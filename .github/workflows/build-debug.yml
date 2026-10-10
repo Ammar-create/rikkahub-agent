@@ -20,6 +20,9 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -29,12 +32,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: web-ui/pnpm-lock.yaml
 
       - name: Install web-ui dependencies
         working-directory: web-ui
-        run: pnpm install
+        run: |
+          bun install
+          pnpm install
 
       - name: Build Debug APK
         run: |
