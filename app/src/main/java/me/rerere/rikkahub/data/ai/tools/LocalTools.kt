@@ -754,9 +754,7 @@ class LocalTools(
         needsApproval = { true },
         execute = {
             val convId = runCatching {
-                if (invocationContext.callerConversationId.isNotBlank()) {
-                    kotlin.uuid.Uuid.parse(invocationContext.callerConversationId)
-                } else null
+                invocationContext.callerConversationId?.takeIf { it.isNotBlank() }?.let { kotlin.uuid.Uuid.parse(it) }
             }.getOrNull()
             if (convId != null) {
                 me.rerere.rikkahub.data.ai.ConversationAgentMode.set(convId, me.rerere.rikkahub.data.ai.AgentMode.BUILD)
