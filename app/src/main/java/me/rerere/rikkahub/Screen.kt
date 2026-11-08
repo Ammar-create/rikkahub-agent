@@ -2,7 +2,6 @@ package me.rerere.rikkahub
 
 import androidx.navigation3.runtime.NavKey
 import kotlinx.serialization.Serializable
-import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceStorageArea
 
 sealed interface Screen : NavKey {
     @Serializable

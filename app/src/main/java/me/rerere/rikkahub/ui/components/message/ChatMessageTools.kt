@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.components.message
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -53,6 +54,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.common.http.jsonObjectOrNull
@@ -1268,7 +1270,7 @@ private fun ChainOfThoughtScope.ProposePlanToolStep(
                                     onClick = {
                                         haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
                                         isLocallyApproved = true
-                                        onToolApproval(
+                                        onToolApproval?.invoke(
                                             tool.toolCallId,
                                             true,
                                             "",

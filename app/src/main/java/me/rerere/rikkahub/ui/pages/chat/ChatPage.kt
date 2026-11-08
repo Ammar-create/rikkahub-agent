@@ -66,7 +66,6 @@ import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
 import me.rerere.rikkahub.data.files.FilesManager
-import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Edit03
 import me.rerere.hugeicons.stroke.Tools
 import me.rerere.rikkahub.data.files.SkillManager
@@ -295,6 +294,7 @@ private fun ChatPageContent(
     val context = LocalContext.current
     val workspaceRepository: WorkspaceRepository = koinInject()
     val chatService: ChatService = koinInject()
+    val skillManager: SkillManager = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val hazeState = rememberHazeState()
     val assistant = setting.getCurrentAssistant()

@@ -792,7 +792,7 @@ private fun NineRouterCard(
                         }
                     }
                     if (state.hasUpdate) {
-                        Tag(type = TagType.PRIMARY) {
+                        Tag(type = TagType.INFO) {
                             Text("Update Available")
                         }
                     }
