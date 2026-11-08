@@ -1,0 +1,94 @@
+name: Build Stable Release APK
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'feat/*'
+      - 'main'
+      - 'master'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify and Checkout Submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive || true
+          if [ ! -f "llama-cpp/native/llama.cpp/CMakeLists.txt" ]; then
+            echo "Checking out pinned llama.cpp commit 596a5795..."
+            mkdir -p llama-cpp/native
+            rm -rf llama-cpp/native/llama.cpp
+            git clone --no-checkout https://github.com/ggml-org/llama.cpp.git llama-cpp/native/llama.cpp
+            cd llama-cpp/native/llama.cpp
+            git checkout 596a5795bdd6da317ea103fc06c0a71c296e3669
+            cd ../../..
+          fi
+          if [ ! -d "material3/material-color-utilities/kotlin" ]; then
+            echo "Checking out pinned material-color-utilities commit 6fd88eb3..."
+            rm -rf material3/material-color-utilities
+            git clone --no-checkout https://github.com/material-foundation/material-color-utilities.git material3/material-color-utilities
+            cd material3/material-color-utilities
+            git checkout 6fd88eb3e95ba1d457842e2a2bf847d06b3a018a
+            cd ../..
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install web-ui dependencies
+        working-directory: web-ui
+        run: |
+          bun install
+          pnpm install
+
+      - name: Setup Signing Keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p app
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
+            echo "Using secure repository secret keystore"
+            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > app/release.keystore
+          else
+            echo "No secret found, generating ephemeral fallback keystore"
+            keytool -genkey -v -keystore app/release.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Release,O=Android,C=US"
+          fi
+          cp app/release.keystore release.keystore
+          printf "storeFile=release.keystore\nstorePassword=android\nkeyAlias=androiddebugkey\nkeyPassword=android\n" > local.properties
+
+      - name: Build Stable Release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-parallel --stacktrace
+
+      - name: Upload Stable Release APK
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: rikkahub-agent-stable-release-arm64-v8a
+          path: app/build/outputs/apk/**/release/*arm64-v8a*.apk
+          retention-days: 7
