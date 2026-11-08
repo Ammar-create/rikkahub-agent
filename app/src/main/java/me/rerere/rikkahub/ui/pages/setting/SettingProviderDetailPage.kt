@@ -270,6 +270,10 @@ private fun SettingProviderConfigPage(
     onEdit: (ProviderSetting) -> Unit,
     onDelete: () -> Unit
 ) {
+    if (provider is ProviderSetting.NineRouter) {
+        SettingNineRouterPage()
+        return
+    }
     if (provider is ProviderSetting.Codex) {
         CodexProviderConfigure(
             provider = provider,

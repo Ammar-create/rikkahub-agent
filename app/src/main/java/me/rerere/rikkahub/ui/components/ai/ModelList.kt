@@ -66,10 +66,13 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.providers.ninerouter.NINEROUTER_BASE_URL
+import me.rerere.ai.provider.providers.ninerouter.NineRouterService
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Brain02
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.ChartColumn
 import me.rerere.hugeicons.stroke.DragDropHorizontal
 import me.rerere.hugeicons.stroke.Favourite
 import me.rerere.hugeicons.stroke.Image03
@@ -325,6 +328,37 @@ private fun ColumnScope.ModelList(
     val settingsStore = koinInject<SettingsStore>()
     val settings = settingsStore.settingsFlow
         .collectAsStateWithLifecycle()
+    val nineRouterService = koinInject<NineRouterService>()
+    var showNineRouterQuotaSheet by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val nineRouterProvider = providers.firstOrNull { nineRouterService.isNineRouter(it) }
+        if (nineRouterProvider != null && nineRouterService.isOnline()) {
+            runCatching {
+                val baseUrl = if (nineRouterProvider is ProviderSetting.NineRouter) {
+                    nineRouterProvider.baseUrl
+                } else {
+                    (nineRouterProvider as? ProviderSetting.OpenAI)?.baseUrl ?: NINEROUTER_BASE_URL
+                }
+                val remoteModels = nineRouterService.fetchModels(baseUrl)
+                if (remoteModels.isNotEmpty()) {
+                    settingsStore.update { currentSettings ->
+                        val updatedProviders = currentSettings.providers.map { p ->
+                            if (p.id == nineRouterProvider.id) {
+                                val existingMap = p.models.associateBy { it.modelId }
+                                val mergedModels = remoteModels.map { rm ->
+                                    val existing = existingMap[rm.modelId]
+                                    if (existing != null) rm.copy(id = existing.id) else rm
+                                }
+                                p.copyProvider(models = mergedModels)
+                            } else p
+                        }
+                        currentSettings.copy(providers = updatedProviders)
+                    }
+                }
+            }
+        }
+    }
 
     val favoriteModels = settings.value.favoriteModels.mapNotNull { modelId ->
         val model = settings.value.providers.findModelById(modelId) ?: return@mapNotNull null
@@ -520,6 +554,18 @@ private fun ColumnScope.ModelList(
                             onDismiss()
                         },
                         tail = {
+                            if (nineRouterService.isNineRouter(provider)) {
+                                IconButton(
+                                    onClick = { showNineRouterQuotaSheet = true }
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.ChartColumn,
+                                        contentDescription = "9Router Quota",
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
                             IconButton(
                                 onClick = {
                                     coroutineScope.launch {
@@ -597,6 +643,18 @@ private fun ColumnScope.ModelList(
                         onDismiss()
                     },
                     tail = {
+                        if (nineRouterService.isNineRouter(providerSetting)) {
+                            IconButton(
+                                onClick = { showNineRouterQuotaSheet = true }
+                            ) {
+                                Icon(
+                                    imageVector = HugeIcons.ChartColumn,
+                                    contentDescription = "9Router Quota",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = {
                                 coroutineScope.launch {
@@ -684,6 +742,10 @@ private fun ColumnScope.ModelList(
                 )
             }
         }
+    }
+
+    if (showNineRouterQuotaSheet) {
+        NineRouterQuotaSheet(onDismiss = { showNineRouterQuotaSheet = false })
     }
 }
 

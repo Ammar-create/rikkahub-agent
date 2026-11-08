@@ -527,19 +527,31 @@ class GenerationLoop(
             if (newParts == msg.parts) msg else msg.copy(parts = newParts)
         }
 
-        val turnStartMs = android.os.SystemClock.elapsedRealtime()
+        var turnStartMs = android.os.SystemClock.elapsedRealtime()
+        var lastActivityMs = turnStartMs
         var loopGuardTripCount = 0
 
         for (stepIndex in 0 until maxSteps) {
-            // Wall-clock cap: any single user turn that has been running longer than the
-            // budget is force-ended, regardless of whether the model wants more steps.
-            // This is the second line of defence after maxSteps; without it a model that
-            // discovers many distinct tool calls (each within the loop guard) can still
-            // run for hours.
-            val elapsedMs = android.os.SystemClock.elapsedRealtime() - turnStartMs
-            if (elapsedMs > ToolRuntimeLimits.turnBudgetMs) {
-                Log.w(TAG, "generateText: wall-clock cap (${ToolRuntimeLimits.turnBudgetMs}ms) hit at step #$stepIndex; force-ending turn")
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            val idleMs = nowMs - lastActivityMs
+            if (idleMs > ToolRuntimeLimits.idleTimeoutMs) {
+                Log.w(TAG, "generateText: idle timeout exceeded (${idleMs}ms > ${ToolRuntimeLimits.idleTimeoutMs}ms); ending turn")
                 break
+            }
+
+            // Wall-clock cap: any single user turn that has been running longer than the
+            // budget is force-ended, UNLESS active progress is being made (continuous tool
+            // execution / no idle stall). When progress is active, long-task turns are allowed
+            // to continue past the initial budget window.
+            val elapsedMs = nowMs - turnStartMs
+            if (elapsedMs > ToolRuntimeLimits.turnBudgetMs) {
+                if (idleMs < ToolRuntimeLimits.idleTimeoutMs) {
+                    Log.i(TAG, "generateText: wall-clock cap (${ToolRuntimeLimits.turnBudgetMs}ms) reached at step #$stepIndex, but active progress detected (${idleMs}ms idle); extending turn")
+                    turnStartMs = nowMs
+                } else {
+                    Log.w(TAG, "generateText: wall-clock cap (${ToolRuntimeLimits.turnBudgetMs}ms) hit at step #$stepIndex; force-ending turn")
+                    break
+                }
             }
             // Repeated loop-guard trips mean the model is flailing: it bumps into the
             // guard, picks a different tool, that one also gets guarded, and so on. After
@@ -608,6 +620,7 @@ class GenerationLoop(
                         systemAddendum = systemAddendum,
                         messages = messages,
                         onUpdateMessages = {
+                            lastActivityMs = android.os.SystemClock.elapsedRealtime()
                             messages = it.transforms(
                                 transformers = outputTransformers,
                                 context = context,
@@ -641,6 +654,7 @@ class GenerationLoop(
                         conversationLorebookIds = conversationLorebookIds,
                         workspaceCwd = workspaceCwd,
                     )
+                    lastActivityMs = android.os.SystemClock.elapsedRealtime()
                 } catch (t: Throwable) {
                     // CancellationException is honoured verbatim — stopGeneration has its
                     // own cancelToolByUser path that marks tools cancelled. We only need
@@ -1057,23 +1071,45 @@ class GenerationLoop(
                             // global ${ToolRuntimeLimits.turnBudgetMs}ms cap. If the budget is
                             // already blown when we start the tool, return a structured
                             // wall-clock envelope instead of even attempting.
-                            val remainingMs = ToolRuntimeLimits.turnBudgetMs -
-                                (android.os.SystemClock.elapsedRealtime() - turnStartMs)
-                            val result = if (remainingMs <= 0L) {
+                            // When active progress is happening (idleMs < ToolRuntimeLimits.idleTimeoutMs),
+                            // do NOT choke tools with remainingMs <= 0. Allow each tool call its own
+                            // healthy execution budget (up to min(turnBudgetMs, 10 min)) rather than
+                            // prematurely aborting active tools with tool_cancelled_wall_clock.
+                            val nowMs = android.os.SystemClock.elapsedRealtime()
+                            val idleMs = nowMs - lastActivityMs
+                            val wallRemainingMs = ToolRuntimeLimits.turnBudgetMs -
+                                (nowMs - turnStartMs)
+                            val executionBudgetMs = if (idleMs < ToolRuntimeLimits.idleTimeoutMs) {
+                                if (wallRemainingMs <= 0L) {
+                                    turnStartMs = nowMs
+                                }
+                                if (wallRemainingMs > 0L) {
+                                    maxOf(wallRemainingMs, minOf(ToolRuntimeLimits.turnBudgetMs, 10L * 60_000L))
+                                } else {
+                                    minOf(ToolRuntimeLimits.turnBudgetMs, 10L * 60_000L)
+                                }
+                            } else {
+                                wallRemainingMs
+                            }
+
+                            // Record activity as tool execution starts
+                            lastActivityMs = android.os.SystemClock.elapsedRealtime()
+
+                            val result = if (executionBudgetMs <= 0L) {
                                 Log.w(TAG, "generateText: ${toolDef.name} skipped — wall-clock budget already exceeded")
                                 listOf(UIMessagePart.Text(json.encodeToString(buildJsonObject {
                                     put("error", JsonPrimitive("tool_cancelled_wall_clock"))
                                     put("detail", JsonPrimitive("turn budget exceeded before tool started"))
                                 })))
                             } else {
-                                withTimeoutOrNull(remainingMs) { toolDef.execute(args) }
+                                withTimeoutOrNull(executionBudgetMs) { toolDef.execute(args) }
                                     ?: run {
                                         Log.w(TAG, "generateText: ${toolDef.name} cancelled — wall-clock budget exhausted mid-execution")
                                         listOf(UIMessagePart.Text(json.encodeToString(buildJsonObject {
                                             put("error", JsonPrimitive("tool_cancelled_wall_clock"))
                                             put(
                                                 "detail",
-                                                JsonPrimitive("tool execution exceeded the ${ToolRuntimeLimits.turnBudgetMs / 1000}s turn budget")
+                                                JsonPrimitive("tool execution exceeded the ${executionBudgetMs / 1000}s turn budget")
                                             )
                                         })))
                                     }
@@ -1087,7 +1123,11 @@ class GenerationLoop(
                             executedTools += markedTool.copy(
                                 output = maybeTruncateToolOutput(tool.toolCallId, result, hasShellAccess)
                             )
+                            // Record activity on successful tool completion
+                            lastActivityMs = android.os.SystemClock.elapsedRealtime()
                         }.onFailure {
+                            // Record activity on tool execution failure
+                            lastActivityMs = android.os.SystemClock.elapsedRealtime()
                             // runCatching also captures CancellationException (e.g. the user
                             // pressed stop mid tool execution). That must propagate, not turn
                             // into a tool_failed envelope: a swallowed cancellation leaves a

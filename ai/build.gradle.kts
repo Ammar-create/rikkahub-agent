@@ -38,6 +38,7 @@ android {
 
 dependencies {
     implementation(project(":common"))
+    implementation(project(":workspace"))
 
     // Compose
     implementation(libs.androidx.core.ktx)

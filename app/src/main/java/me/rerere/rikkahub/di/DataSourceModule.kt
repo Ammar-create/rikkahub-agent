@@ -369,8 +369,18 @@ val dataSourceModule = module {
                     json = json,
                 )
             )
+            pm.registerProvider(
+                "ninerouter",
+                me.rerere.ai.provider.providers.ninerouter.NineRouterProvider(
+                    client = get(),
+                    context = get(),
+                    nineRouterService = get(),
+                )
+            )
         }
     }
+
+    single { me.rerere.ai.provider.providers.ninerouter.NineRouterService(get(), get()) }
 
     single { BackupManager(context = get(), database = get(), settingsStore = get(), json = get()) }
 

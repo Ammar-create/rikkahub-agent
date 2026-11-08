@@ -45,6 +45,7 @@ val repositoryModule = module {
 
     single {
         val context: Context = get()
+        val audioBridge = get<me.rerere.rikkahub.workspace.audio.WorkspaceAudioBridge>()
         WorkspaceManager(
             baseDir = File(context.filesDir, "workspaces"),
             shellRunner = ProotShellRunner(
@@ -65,7 +66,10 @@ val repositoryModule = module {
                     target = "/upload",
                 ),
             ),
-        )
+        ).apply {
+            onProcessStarted = { audioBridge.acquire() }
+            onProcessStopped = { audioBridge.release() }
+        }
     }
 
     single {

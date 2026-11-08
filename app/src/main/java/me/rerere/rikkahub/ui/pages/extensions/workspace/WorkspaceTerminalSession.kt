@@ -9,6 +9,8 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
@@ -65,6 +67,9 @@ internal fun createWorkspaceTerminalSession(
         "LC_ALL=C.UTF-8",
         "USER=root",
         "SHELL=/bin/bash",
+        "DISPLAY=:0",
+        "PULSE_SERVER=tcp:127.0.0.1:4713",
+        "XDG_RUNTIME_DIR=/tmp/runtime-root",
         "/bin/bash",
     )
 
@@ -72,6 +77,9 @@ internal fun createWorkspaceTerminalSession(
         "PROOT_LOADER=${loader.absolutePath}",
         "PROOT_TMP_DIR=${tempDir.absolutePath}",
         "TMPDIR=${tempDir.absolutePath}",
+        "DISPLAY=:0",
+        "PULSE_SERVER=tcp:127.0.0.1:4713",
+        "XDG_RUNTIME_DIR=/tmp/runtime-root",
     )
 
     if (shellCompatibilityMode) {
@@ -96,6 +104,12 @@ internal fun prepareWorkspaceTerminalSession(context: Context, root: String) {
     val linuxDir = File(workspaceDir, "linux")
     File(workspaceDir, "files").mkdirs()
     File(workspaceDir, "tmp").mkdirs()
+    File(linuxDir, "tmp/runtime-root").apply {
+        mkdirs()
+        setReadable(true, true)
+        setWritable(true, true)
+        setExecutable(true, true)
+    }
     File(appContext.filesDir, FileFolders.SKILLS).mkdirs()
     RootfsPatcher().patch(
         linuxDir,
@@ -189,6 +203,8 @@ internal class WorkspaceTerminalSessionClient(
 
 internal class WorkspaceTerminalViewClient(
     private val context: Context,
+    val root: String? = null,
+    var onImagePreview: ((String) -> Unit)? = null,
 ) : TerminalViewClient {
     var terminalView: TerminalView? = null
     var controlDown: Boolean = false
@@ -197,16 +213,17 @@ internal class WorkspaceTerminalViewClient(
     override fun onScale(scale: Float): Float = scale.coerceIn(0.8f, 1.25f)
 
     override fun onSingleTapUp(e: MotionEvent) {
-        if (openUrlAtTap(e)) return
+        if (openUrlOrMediaAtTap(e)) return
         focusAndShowKeyboard()
     }
 
     /**
-     * 检测点击位置是否落在一个 URL 上, 是则用浏览器打开并返回 true.
-     * TerminalView 0.118.0 没有内置链接点击, 这里基于 getColumnAndRow() + 屏幕缓冲文本自行实现,
-     * 并通过 getLineWrap() 还原被软换行拆开的长 URL.
+     * 检测点击位置是否落在一个 URL 或多媒体文件路径上:
+     * - 图片: 在全屏 ImagePreviewDialog 中预览 (支持 http(s):// 与 本地绝对/相对路径)
+     * - 视频: 唤起外部播放器播放
+     * - 普通链接: 用浏览器打开
      */
-    private fun openUrlAtTap(e: MotionEvent): Boolean {
+    private fun openUrlOrMediaAtTap(e: MotionEvent): Boolean {
         val view = terminalView ?: return false
         if (view.isSelectingText) return false
         val emulator = view.mEmulator ?: return false
@@ -222,8 +239,6 @@ internal class WorkspaceTerminalViewClient(
         if (row < minAccessibleRow || row > maxAccessibleRow) return false
 
         // 向上/向下扩展到完整逻辑行(被软换行拆开的行 mLineWrap 为 true).
-        // 限制最多扩展 URL_MAX_WRAP_ROWS 行: 真实 URL 跨不了这么多行, 同时避免连续无换行的
-        // 长输出导致单次点击遍历整个 transcript.
         val minRow = (row - URL_MAX_WRAP_ROWS).coerceAtLeast(minAccessibleRow)
         val maxRow = (row + URL_MAX_WRAP_ROWS).coerceAtMost(maxAccessibleRow)
         var startRow = row
@@ -242,15 +257,110 @@ internal class WorkspaceTerminalViewClient(
         }
         if (tapIndex < 0) return false
 
-        val match = URL_REGEX.findAll(line).firstOrNull { tapIndex in it.range } ?: return false
-        val url = match.value.trimEnd(*URL_TRAILING_TRIM)
+        // 1. 优先检测 http/https/ftp URL
+        val match = URL_REGEX.findAll(line).firstOrNull { tapIndex in it.range }
+        if (match != null) {
+            val url = match.value.trimEnd(*URL_TRAILING_TRIM)
+            val pathPart = url.substringBefore('?').substringBefore('#')
+            val ext = pathPart.substringAfterLast('.', "").lowercase()
+            if (IMAGE_EXTENSIONS.contains(ext)) {
+                onImagePreview?.invoke(url)
+                return true
+            }
+            return runCatching {
+                val intent = Intent(Intent.ACTION_VIEW, url.toUri())
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                true
+            }.getOrElse {
+                Log.w("WorkspaceTerminal", "Failed to open url: $url", it)
+                false
+            }
+        }
+
+        // 2. 检测本地多媒体文件路径 (图片/视频)
+        val candidate = findMediaCandidateAt(line, tapIndex)
+        if (candidate != null) {
+            val resolved = resolveMediaFile(candidate)
+            if (resolved != null && resolved.exists() && resolved.isFile) {
+                val ext = resolved.extension.lowercase()
+                if (IMAGE_EXTENSIONS.contains(ext)) {
+                    onImagePreview?.invoke("file://${resolved.absolutePath}")
+                    return true
+                }
+                if (VIDEO_EXTENSIONS.contains(ext)) {
+                    return openExternalMediaFile(resolved)
+                }
+            }
+        }
+
+        return false
+    }
+
+    private fun findMediaCandidateAt(line: CharSequence, tapIndex: Int): String? {
+        if (tapIndex !in 0 until line.length) return null
+        val delimiters = " \t\r\n'\"()[]{}<>,;:"
+        var start = tapIndex
+        while (start > 0 && !delimiters.contains(line[start - 1])) {
+            start--
+        }
+        var end = tapIndex
+        while (end < line.length && !delimiters.contains(line[end])) {
+            end++
+        }
+        if (start >= end) return null
+        val token = line.subSequence(start, end).toString().trimEnd(*URL_TRAILING_TRIM)
+        val ext = token.substringAfterLast('.', "").lowercase()
+        return if (IMAGE_EXTENSIONS.contains(ext) || VIDEO_EXTENSIONS.contains(ext)) token else null
+    }
+
+    private fun resolveMediaFile(rawPath: String): File? {
+        val cleanPath = rawPath.removePrefix("file://").trim()
+        val direct = File(cleanPath)
+        if (direct.exists()) return direct
+
+        val rootName = root ?: return null
+        val appContext = context.applicationContext
+        val workspaceDir = File(File(appContext.filesDir, "workspaces"), rootName)
+        val filesDir = File(workspaceDir, "files")
+        val linuxDir = File(workspaceDir, "linux")
+
+        if (cleanPath.startsWith("/workspace/")) {
+            val f = File(filesDir, cleanPath.removePrefix("/workspace/"))
+            if (f.exists()) return f
+        }
+        if (cleanPath.startsWith("/")) {
+            val f = File(linuxDir, cleanPath.removePrefix("/"))
+            if (f.exists()) return f
+        }
+        val rel = File(filesDir, cleanPath)
+        if (rel.exists()) return rel
+
+        val rootfsRel = File(linuxDir, cleanPath)
+        if (rootfsRel.exists()) return rootfsRel
+
+        return null
+    }
+
+    private fun openExternalMediaFile(file: File): Boolean {
         return runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, url.toUri())
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file,
+            )
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                file.extension.lowercase()
+            ) ?: "video/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             true
         }.getOrElse {
-            Log.w("WorkspaceTerminal", "Failed to open url: $url", it)
+            Log.w("WorkspaceTerminal", "Failed to open media file: ${file.absolutePath}", it)
             false
         }
     }
@@ -332,6 +442,9 @@ private val URL_REGEX =
 
 // 终端里 URL 后面常跟标点(行尾句号、被括号包裹等), 打开前去掉这些结尾字符
 private val URL_TRAILING_TRIM = charArrayOf('.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"')
+
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "svg")
+private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mkv", "avi", "mov")
 
 private fun Context.activeDnsServers(): List<String> {
     val connectivityManager =

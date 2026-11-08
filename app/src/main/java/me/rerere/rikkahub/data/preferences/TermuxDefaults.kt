@@ -20,7 +20,7 @@ object TermuxDefaults {
     /** Default per-turn wall-clock budget in ms. */
     const val DEFAULT_TURN_BUDGET_MS = 10L * 60L * 1_000L  // 10 min
     const val MIN_TURN_BUDGET_MS     =  1L * 60L * 1_000L  //  1 min
-    const val MAX_TURN_BUDGET_MS     = 60L * 60L * 1_000L  // 60 min
+    const val MAX_TURN_BUDGET_MS     =  4L * 60L * 60L * 1_000L  // 4 hours (240 min)
 
     // --- Per-turn tool-call step cap (app-wide) --------------------------------------------
     // Default is the 32 that used to be GenerationHandler's hardcoded maxSteps. The ceiling is

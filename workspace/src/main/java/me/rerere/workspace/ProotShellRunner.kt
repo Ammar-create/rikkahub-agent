@@ -42,6 +42,7 @@ class ProotShellRunner(
         }
 
         context.tempDir.mkdirs()
+        ensureRuntimeDir(context.linuxDir)
         patcher.patch(context.linuxDir)
         val process = newProcessBuilder(context, proot, loader).start()
 
@@ -63,6 +64,7 @@ class ProotShellRunner(
         }
 
         context.tempDir.mkdirs()
+        ensureRuntimeDir(context.linuxDir)
         patcher.patch(context.linuxDir)
         return newProcessBuilder(context, proot, loader).start()
     }
@@ -84,6 +86,9 @@ class ProotShellRunner(
                 environment()["PROOT_LOADER"] = loader.absolutePath
                 environment()["PROOT_TMP_DIR"] = context.tempDir.absolutePath
                 environment()["TMPDIR"] = context.tempDir.absolutePath
+                environment()["DISPLAY"] = ":0"
+                environment()["PULSE_SERVER"] = "tcp:127.0.0.1:4713"
+                environment()["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
             }
 
     private fun buildCommand(
@@ -125,6 +130,9 @@ class ProotShellRunner(
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
+            "DISPLAY=:0",
+            "PULSE_SERVER=tcp:127.0.0.1:4713",
+            "XDG_RUNTIME_DIR=/tmp/runtime-root",
             // 非交互执行约定, 抑制各类 CLI 的交互行为 (确认提示/分页器/颜色转义)
             "CI=true",
             "NO_COLOR=1",
@@ -139,6 +147,16 @@ class ProotShellRunner(
             context.command,
         )
         return command
+    }
+
+    private fun ensureRuntimeDir(linuxDir: File) {
+        val runtimeDir = File(linuxDir, "tmp/runtime-root")
+        if (!runtimeDir.exists()) {
+            runtimeDir.mkdirs()
+        }
+        runtimeDir.setReadable(true, true)
+        runtimeDir.setWritable(true, true)
+        runtimeDir.setExecutable(true, true)
     }
 
     private fun WorkspaceShellContext.prootCwd(): String {

@@ -72,6 +72,20 @@ val DEFAULT_PROVIDERS = listOf(
             Text("On-device - llama.cpp")
         },
     ),
+    ProviderSetting.NineRouter(
+        id = me.rerere.ai.provider.NINEROUTER_PROVIDER_ID,
+        name = "9Router",
+        baseUrl = "http://127.0.0.1:20128/v1",
+        apiKey = "",
+        enabled = true,
+        builtIn = true,
+        description = {
+            Text("Local AI Gateway & Reverse Proxy on :20128. Multi-upstream routing, model virtualization and quota management.")
+        },
+        shortDescription = {
+            Text("Local AI Gateway · :20128")
+        },
+    ),
     // All built-in providers ship DISABLED by default. New installs start with zero
     // network-egress paths so a freshly-installed app can never make an LLM call (or
     // bill any account) until the user explicitly enables a provider AND adds an API

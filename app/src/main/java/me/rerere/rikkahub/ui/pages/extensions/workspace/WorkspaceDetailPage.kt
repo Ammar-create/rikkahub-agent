@@ -75,6 +75,7 @@ import me.rerere.hugeicons.stroke.Bash
 import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.File02
+import me.rerere.hugeicons.stroke.FileDownload
 import me.rerere.hugeicons.stroke.FileImport
 import me.rerere.hugeicons.stroke.Folder01
 import me.rerere.hugeicons.stroke.MoreVertical
@@ -97,16 +98,21 @@ import me.rerere.rikkahub.utils.plus
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.RootfsInstallStage
 import me.rerere.workspace.WorkspaceFileEntry
+import me.rerere.workspace.WorkspaceManager
 import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageArea
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
 fun WorkspaceDetailPage(id: String) {
     val navController = LocalNavController.current
     val vm: WorkspaceDetailVM = koinViewModel(parameters = { parametersOf(id) })
+    val workspaceManager: WorkspaceManager = koinInject()
     val state by vm.state.collectAsStateWithLifecycle()
     val installProgress by vm.installProgress.collectAsStateWithLifecycle()
     val installError by vm.installError.collectAsStateWithLifecycle()
@@ -149,6 +155,20 @@ fun WorkspaceDetailPage(id: String) {
         if (uri == null) return@rememberLauncherForActivityResult
         val destinationTree = DocumentFile.fromTreeUri(context, uri) ?: return@rememberLauncherForActivityResult
         vm.exportFolder(entry, destinationTree) { docUri -> context.contentResolver.openOutputStream(docUri) }
+    }
+    val archiveExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/gzip"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val outputStream = context.contentResolver.openOutputStream(uri) ?: return@rememberLauncherForActivityResult
+        vm.exportWorkspaceArchive(outputStream) { success ->
+            val message = if (success) {
+                context.getString(R.string.workspace_export_success)
+            } else {
+                context.getString(R.string.workspace_export_failed)
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
     }
 
     BackHandler(enabled = pagerState.currentPage == 1 && state.path.isNotBlank()) {
@@ -195,7 +215,57 @@ fun WorkspaceDetailPage(id: String) {
                     }
                     if (state.workspace?.shellStatus != WorkspaceShellStatus.DISABLED.name) {
                         IconButton(onClick = { navController.navigate(Screen.WorkspaceTerminal(id)) }) {
-                            Icon(HugeIcons.ComputerTerminal01, contentDescription = stringResource(R.string.accessibility_open_terminal))
+                            Icon(HugeIcons.Bash, contentDescription = stringResource(R.string.accessibility_open_terminal))
+                        }
+                        IconButton(
+                            onClick = {
+                                val root = state.workspace?.root
+                                if (root != null) {
+                                    scope.launch {
+                                        val running = withContext(Dispatchers.IO) {
+                                            workspaceManager.isX11DisplayRunning(root)
+                                        }
+                                        if (!running) {
+                                            withContext(Dispatchers.IO) {
+                                                workspaceManager.startX11Display(root)
+                                                for (i in 1..10) {
+                                                    kotlinx.coroutines.delay(300)
+                                                    if (workspaceManager.isX11DisplayRunning(root)) break
+                                                }
+                                            }
+                                        }
+                                        navController.navigate(
+                                            Screen.WebView(
+                                                url = "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=remote",
+                                                title = "Workspace Desktop",
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(HugeIcons.ComputerTerminal01, contentDescription = "Desktop GUI")
+                        }
+                    }
+                    var overflowMenuExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { overflowMenuExpanded = true }) {
+                            Icon(HugeIcons.MoreVertical, contentDescription = stringResource(R.string.accessibility_more_options))
+                        }
+                        DropdownMenu(
+                            expanded = overflowMenuExpanded,
+                            onDismissRequest = { overflowMenuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.workspace_detail_export_archive)) },
+                                leadingIcon = { Icon(HugeIcons.FileDownload, contentDescription = null) },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    state.workspace?.let { ws ->
+                                        archiveExportLauncher.launch("${ws.name}.tar.gz")
+                                    }
+                                },
+                            )
                         }
                     }
                 },

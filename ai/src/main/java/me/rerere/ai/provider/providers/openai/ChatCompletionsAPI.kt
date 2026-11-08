@@ -213,8 +213,21 @@ class ChatCompletionsAPI(
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
                         Log.d(TAG, "onFailure: error body $bodyElement")
-                        exception = bodyElement.parseErrorDetail()
+                        val parsed = bodyElement.parseErrorDetail()
+                        val isNineRouter = request.url.port == 20128 || request.url.toString().contains("20128")
+                        exception = if (isNineRouter) {
+                            val clean = parsed.message.orEmpty().trim()
+                            val msg = if (clean.startsWith("[9Router:")) clean else "[9Router: $clean]"
+                            HttpException(msg, response?.code ?: parsed.statusCode)
+                        } else {
+                            parsed
+                        }
                         Log.i(TAG, "onFailure: $exception")
+                    } else if (response != null && !response.isSuccessful) {
+                        val isNineRouter = request.url.port == 20128 || request.url.toString().contains("20128")
+                        if (isNineRouter) {
+                            exception = HttpException("[9Router: HTTP ${response.code} ${response.message}]", response.code)
+                        }
                     }
                 } catch (e: Throwable) {
                     Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)

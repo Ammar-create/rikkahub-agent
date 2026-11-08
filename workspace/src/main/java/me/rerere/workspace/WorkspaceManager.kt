@@ -48,6 +48,11 @@ class WorkspaceManager(
 
     fun hasRootfs(root: String): Boolean = File(linuxDir(root), "bin/sh").isFile
 
+    fun findRootfsRoot(): String? {
+        val dirs = baseDir.listFiles()?.filter { it.isDirectory } ?: return null
+        return dirs.firstOrNull { hasRootfs(it.name) }?.name ?: dirs.firstOrNull()?.name
+    }
+
     fun deleteWorkspace(root: String): Boolean = synchronized(backgroundLifecycleLock) {
         // 先杀掉该 workspace 所有后台进程, 再删目录, 避免进程仍持有已删除目录下的 fd
         killAllBackground(root)
@@ -127,6 +132,25 @@ class WorkspaceManager(
     }
 
     /**
+     * Streams files from the workspace file area (/workspace) into a .tar.gz [outputStream],
+     * preserving permissions, modification times, and symlinks.
+     */
+    fun exportWorkspaceArchive(root: String, outputStream: OutputStream) {
+        val dir = filesDir(root)
+        dir.mkdirs()
+        WorkspaceArchive.writeArchive(dir, outputStream)
+    }
+
+    /**
+     * Extracts a .tar.gz [inputStream] into the workspace file area (/workspace).
+     */
+    fun importWorkspaceArchive(root: String, inputStream: InputStream) {
+        val dir = filesDir(root)
+        dir.mkdirs()
+        WorkspaceArchive.extractArchive(inputStream, dir)
+    }
+
+    /**
      * 把 Rootfs 内的绝对路径映射到宿主机上的真实文件。
      *
      * bind mount 的 source 本身就是 Android 侧的普通目录, 因此 /skills 这类挂载路径
@@ -175,7 +199,7 @@ class WorkspaceManager(
         return fileSystem.tree(location.rootDir, location.relativePath, maxDepth)
     }
 
-    private fun resolveRootfsFile(root: String, path: String): File {
+    fun resolveRootfsFile(root: String, path: String): File {
         val location = resolveRootfsPath(root, path)
         return fileSystem.resolve(location.rootDir, location.relativePath)
     }
@@ -237,6 +261,9 @@ class WorkspaceManager(
         )
     }
 
+    var onProcessStarted: (() -> Unit)? = null
+    var onProcessStopped: (() -> Unit)? = null
+
     /**
      * Starts [command] as a long-lived background process for [root]. The process runs
      * in the foreground of its own proot invocation; the caller polls/kills it via
@@ -260,6 +287,7 @@ class WorkspaceManager(
                     timeoutMillis = 0L,
                 )
             )
+            onProcessStarted?.invoke()
             background.start(root, process, command, cwd)
         }
 
@@ -267,9 +295,75 @@ class WorkspaceManager(
 
     fun listBackground(root: String): List<BackgroundStatus> = background.list(root)
 
-    fun killBackground(root: String, id: String): Boolean = background.kill(root, id)
+    fun killBackground(root: String, id: String): Boolean {
+        val result = background.kill(root, id)
+        if (result) {
+            onProcessStopped?.invoke()
+        }
+        return result
+    }
 
-    fun killAllBackground(root: String) = background.killAll(root)
+    fun killAllBackground(root: String) {
+        background.killAll(root)
+        onProcessStopped?.invoke()
+    }
+
+    /**
+     * Checks if the virtual X11 display stack (noVNC websockify or VNC server) is listening.
+     */
+    fun isX11DisplayRunning(root: String): Boolean {
+        fun isPortOpen(port: Int): Boolean = try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+        return isPortOpen(6080) || isPortOpen(5900)
+    }
+
+    /**
+     * Starts the virtual X11 display stack:
+     * 1. Xvfb on display :0 (${width}x${height}x24)
+     * 2. x11vnc RFB server on 127.0.0.1:5900
+     * 3. websockify forwarding HTML5 noVNC client on 127.0.0.1:6080 to 5900
+     */
+    fun startX11Display(root: String, width: Int = 1280, height: Int = 800): Boolean {
+        if (isX11DisplayRunning(root)) return true
+
+        stopX11Display(root)
+
+        val script = """
+            rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+            Xvfb :0 -screen 0 ${width}x${height}x24 &
+            sleep 1
+            x11vnc -display :0 -rfbport 5900 -nopw -listen 127.0.0.1 -forever -bg
+            sleep 1
+            websockify --web /usr/share/novnc 6080 127.0.0.1:5900
+        """.trimIndent()
+
+        startBackground(root = root, command = script, cwd = "")
+        return true
+    }
+
+    /**
+     * Cleanly kills Xvfb, x11vnc, websockify and removes lock files.
+     */
+    fun stopX11Display(root: String) {
+        listBackground(root).forEach { bg ->
+            if (bg.command.contains("websockify") || bg.command.contains("Xvfb") || bg.command.contains("x11vnc")) {
+                killBackground(root, bg.id)
+            }
+        }
+        runCatching {
+            executeCommand(
+                root = root,
+                command = "pkill -f websockify || true; pkill -f x11vnc || true; pkill -f Xvfb || true; rm -f /tmp/.X0-lock /tmp/.X11-unix/X0",
+                timeoutMillis = 5_000,
+            )
+        }
+    }
 
     private fun resolveCommandWorkingDir(root: String, cwd: String): File {
         val workingDir = fileSystem.resolve(filesDir(root), cwd)

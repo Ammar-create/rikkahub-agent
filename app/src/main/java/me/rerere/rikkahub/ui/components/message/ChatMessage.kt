@@ -80,6 +80,7 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
+import me.rerere.rikkahub.ui.components.media.StudioHeroMediaCard
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
@@ -93,6 +94,8 @@ import me.rerere.rikkahub.ui.theme.LocalChatFontFamily
 import me.rerere.rikkahub.ui.theme.rememberChatFontFamily
 import me.rerere.rikkahub.ui.theme.extendColors
 import me.rerere.rikkahub.utils.JsonInstant
+import me.rerere.rikkahub.utils.jsonPrimitiveOrNull
+import kotlinx.serialization.json.contentOrNull
 import me.rerere.rikkahub.utils.openUrl
 import me.rerere.rikkahub.utils.urlDecode
 import java.util.Locale
@@ -280,6 +283,12 @@ fun ChatMessage(
     }
 }
 
+private sealed interface ChatMessageRenderBlock {
+    data class Thinking(val block: MessagePartBlock.ThinkingBlock) : ChatMessageRenderBlock
+    data class Content(val block: MessagePartBlock.ContentBlock) : ChatMessageRenderBlock
+    data class ImageGroup(val images: List<UIMessagePart.Image>, val key: String) : ChatMessageRenderBlock
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 private fun MessagePartsBlock(
@@ -340,9 +349,39 @@ private fun MessagePartsBlock(
     // on the tail part (e.g. streaming text appended to the final Text part).
     val partsKey = parts.size.toString() + (parts.lastOrNull()?.hashCode()?.toString() ?: "")
     val groupedParts = remember(partsKey) { parts.groupMessageParts() }
-    groupedParts.fastForEach { block ->
-        when (block) {
-            is MessagePartBlock.ThinkingBlock -> {
+    val renderBlocks = remember(groupedParts) {
+        val list = mutableListOf<ChatMessageRenderBlock>()
+        var pendingImages = mutableListOf<UIMessagePart.Image>()
+        fun flushImages() {
+            if (pendingImages.isNotEmpty()) {
+                val key = pendingImages.joinToString { it.url.takeLast(16) }
+                list.add(ChatMessageRenderBlock.ImageGroup(pendingImages.toList(), key))
+                pendingImages = mutableListOf()
+            }
+        }
+        groupedParts.forEach { block ->
+            when (block) {
+                is MessagePartBlock.ContentBlock -> {
+                    if (block.part is UIMessagePart.Image) {
+                        pendingImages.add(block.part)
+                    } else {
+                        flushImages()
+                        list.add(ChatMessageRenderBlock.Content(block))
+                    }
+                }
+                is MessagePartBlock.ThinkingBlock -> {
+                    flushImages()
+                    list.add(ChatMessageRenderBlock.Thinking(block))
+                }
+            }
+        }
+        flushImages()
+        list
+    }
+    renderBlocks.fastForEach { rBlock ->
+        when (rBlock) {
+            is ChatMessageRenderBlock.Thinking -> {
+                val block = rBlock.block
                 if (block.steps.isNotEmpty()) {
                     val isReasoningOnlyBlock = block.steps.fastAll { it is ThinkingStep.ReasoningStep }
                     // Force-expand whenever any tool step is awaiting approval. Without
@@ -397,7 +436,19 @@ private fun MessagePartsBlock(
                 }
             }
 
-            is MessagePartBlock.ContentBlock -> key(block.index) {
+            is ChatMessageRenderBlock.ImageGroup -> key(rBlock.key) {
+                val images = rBlock.images
+                val firstRatio = images.firstOrNull()?.metadata?.get("aspect_ratio")?.jsonPrimitiveOrNull?.contentOrNull
+                StudioHeroMediaCard(
+                    images = images.map { it.url },
+                    aspectRatio = firstRatio,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            is ChatMessageRenderBlock.Content -> {
+                val block = rBlock.block
+                key(block.index) {
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
                         // A Text part may carry a `rikkahub.webview` metadata block
@@ -533,25 +584,11 @@ private fun MessagePartsBlock(
                     }
 
                     is UIMessagePart.Image -> {
-                        val isImageLoading =
-                            part.url.isBlank() || part.url.matches(Regex("^data:image/[^;]*;base64,\\s*$"))
-                        if (isImageLoading) {
-                            Box(
-                                modifier = Modifier
-                                    .size(72.dp)
-                                    .clip(MaterialTheme.shapes.medium)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .shimmer(isLoading = true)
-                            )
-                        } else {
-                            ZoomableAsyncImage(
-                                model = part.url,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .clip(MaterialTheme.shapes.medium)
-                                    .height(72.dp)
-                            )
-                        }
+                        StudioHeroMediaCard(
+                            images = listOf(part.url),
+                            aspectRatio = part.metadata?.get("aspect_ratio")?.jsonPrimitiveOrNull?.contentOrNull,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
 
                     is UIMessagePart.Document -> {
@@ -622,6 +659,7 @@ private fun MessagePartsBlock(
             }
         }
     }
+}
 
     // Annotations (always rendered at the end)
     if (annotations.isNotEmpty()) {

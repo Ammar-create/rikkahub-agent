@@ -60,8 +60,10 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.BubbleChatQuestion
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.CancelCircle
+import me.rerere.hugeicons.stroke.CheckList
 import me.rerere.hugeicons.stroke.CheckmarkCircle01
 import me.rerere.hugeicons.stroke.Edit03
+import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.Refresh03
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.Tools
@@ -76,6 +78,27 @@ import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.jsonPrimitiveOrNull
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.key
+import androidx.compose.runtime.movableContentOf
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontFamily
 
 // Per-tool icon/title/summary/preview rendering now lives in ToolUIRegistry
 // (see message/tools/BuiltinToolUIs.kt). This file only keeps the cross-cutting
@@ -545,6 +568,10 @@ private fun ChainOfThoughtScope.AskUserToolStep(
     val isPending = tool.isPending
     val isAnswered = tool.approvalState is ToolApprovalState.Answered
     val arguments = tool.inputAsJson()
+    val haptic = LocalHapticFeedback.current
+
+    // Local optimistic approved proposal
+    var locallyApprovedProposalId by remember { mutableStateOf<String?>(null) }
 
     // Parse questions from arguments
     val questions = remember(arguments) {
@@ -561,12 +588,52 @@ private fun ChainOfThoughtScope.AskUserToolStep(
         }.getOrElse { emptyList() }
     }
 
+    // Parse proposals from arguments
+    val proposals = remember(arguments) {
+        runCatching {
+            arguments.jsonObject["proposals"]?.jsonArray?.mapNotNull { p ->
+                val obj = p.jsonObject
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val title = obj["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: id
+                AskUserProposal(
+                    id = id,
+                    title = title,
+                    description = obj["description"]?.jsonPrimitive?.contentOrNull,
+                    imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull,
+                    diff = obj["diff"]?.jsonPrimitive?.contentOrNull,
+                )
+            } ?: emptyList()
+        }.getOrElse { emptyList() }
+    }
+
+    val answeredProposalId = remember(tool.approvalState, locallyApprovedProposalId) {
+        locallyApprovedProposalId ?: (tool.approvalState as? ToolApprovalState.Answered)?.let { state ->
+            runCatching {
+                val element = JsonInstant.parseToJsonElement(state.answer)
+                val obj = element.jsonObject
+                obj["approved_proposal_id"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["answers"]?.jsonObject?.get("proposal")?.jsonPrimitive?.contentOrNull
+            }.getOrNull()
+        }
+    }
+
     // Track answers for text/single questions
     val answers = remember { mutableStateMapOf<String, String>() }
     // Track selected options for multi questions
     val multiAnswers = remember { mutableStateMapOf<String, Set<String>>() }
 
+    val hasImageMockup = remember(proposals) {
+        proposals.any { !it.imageUrl.isNullOrBlank() }
+    }
+
     val firstQuestion = questions.firstOrNull()?.question ?: "..."
+
+    val titleText = when {
+        hasImageMockup -> "Mockup Review (${proposals.size} Mockups)"
+        proposals.isNotEmpty() -> "Proposals (${proposals.size} Options)"
+        questions.size <= 1 -> firstQuestion
+        else -> stringResource(R.string.chat_message_tool_ask_questions, questions.size)
+    }
 
     var expanded by remember { mutableStateOf(true) }
 
@@ -577,8 +644,13 @@ private fun ChainOfThoughtScope.AskUserToolStep(
             if (loading) {
                 DotLoading(size = 10.dp)
             } else {
+                val iconVector = when {
+                    hasImageMockup -> HugeIcons.Image02
+                    proposals.isNotEmpty() -> HugeIcons.CheckList
+                    else -> HugeIcons.BubbleChatQuestion
+                }
                 Icon(
-                    imageVector = HugeIcons.BubbleChatQuestion,
+                    imageVector = iconVector,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = LocalContentColor.current.copy(alpha = 0.7f)
@@ -587,10 +659,7 @@ private fun ChainOfThoughtScope.AskUserToolStep(
         },
         label = {
             Text(
-                text = if (questions.size <= 1) firstQuestion else stringResource(
-                    R.string.chat_message_tool_ask_questions,
-                    questions.size
-                ),
+                text = titleText,
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.shimmer(isLoading = loading),
@@ -603,114 +672,368 @@ private fun ChainOfThoughtScope.AskUserToolStep(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                questions.forEach { q ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = q.question,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-
-                        if (isPending && onToolAnswer != null) {
-                            if (q.options.isNotEmpty()) {
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    q.options.forEach { option ->
-                                        val selectedOptions = multiAnswers[q.id] ?: emptySet()
-                                        FilterChip(
-                                            selected = if (q.selectionType == "multi") {
-                                                option in selectedOptions
-                                            } else {
-                                                answers[q.id] == option
-                                            },
-                                            onClick = {
-                                                if (q.selectionType == "multi") {
-                                                    multiAnswers[q.id] = if (option in selectedOptions) {
-                                                        selectedOptions - option
-                                                    } else {
-                                                        selectedOptions + option
-                                                    }
-                                                } else {
-                                                    answers[q.id] = option
-                                                }
-                                            },
-                                            label = {
-                                                Text(
-                                                    text = option,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                )
-                                            },
+                // If proposals exist:
+                if (proposals.isNotEmpty()) {
+                    if (hasImageMockup) {
+                        // Swipeable HorizontalPager comparison carousel
+                        val pagerState = rememberPagerState { proposals.size }
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            HorizontalPager(
+                                state = pagerState,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { page ->
+                                val proposal = proposals[page]
+                                val isThisApproved = answeredProposalId == proposal.id
+                                OutlinedCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 4.dp),
+                                    colors = if (isThisApproved) {
+                                        CardDefaults.outlinedCardColors(
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
                                         )
+                                    } else CardDefaults.outlinedCardColors(),
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Text(
+                                                text = proposal.title,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                            if (isThisApproved) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = HugeIcons.CheckmarkCircle01,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp),
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                    Text(
+                                                        text = "Approved",
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        if (!proposal.description.isNullOrBlank()) {
+                                            Text(
+                                                text = proposal.description,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+
+                                        if (!proposal.imageUrl.isNullOrBlank()) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .heightIn(min = 160.dp, max = 340.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                ZoomableAsyncImage(
+                                                    model = proposal.imageUrl,
+                                                    contentDescription = proposal.title,
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                )
+                                            }
+                                        }
+
+                                        if (isPending && onToolAnswer != null && answeredProposalId == null) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                                    locallyApprovedProposalId = proposal.id
+                                                    val answerPayload = buildJsonObject {
+                                                        put("approved_proposal_id", proposal.id)
+                                                        put("title", proposal.title)
+                                                        put("answers", buildJsonObject {
+                                                            put("proposal", JsonPrimitive(proposal.id))
+                                                        })
+                                                    }
+                                                    onToolAnswer(tool.toolCallId, answerPayload.toString())
+                                                },
+                                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                            ) {
+                                                Icon(
+                                                    imageVector = HugeIcons.CheckmarkCircle01,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp),
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Approve This Mockup")
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            OutlinedTextField(
-                                value = answers[q.id] ?: "",
-                                onValueChange = { answers[q.id] = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                textStyle = MaterialTheme.typography.bodySmall,
-                                singleLine = false,
-                                minLines = 1,
-                                maxLines = 3,
-                            )
-                        } else if (isAnswered) {
-                            // Show the user's answer
-                            val answeredState = tool.approvalState as ToolApprovalState.Answered
-                            val answerJson = runCatching {
-                                JsonInstant.parseToJsonElement(answeredState.answer)
-                            }.getOrNull()
-                            val answerText = answerJson?.jsonObject?.get("answers")
-                                ?.jsonObject?.get(q.id)?.jsonPrimitive?.contentOrNull
-                                ?: answeredState.answer
-                            Text(
-                                text = answerText,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
+                            // Carousel pagination dots
+                            if (proposals.size > 1) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    repeat(proposals.size) { iteration ->
+                                        val isCurrent = pagerState.currentPage == iteration
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(horizontal = 3.dp)
+                                                .size(
+                                                    width = if (isCurrent) 16.dp else 6.dp,
+                                                    height = 6.dp,
+                                                )
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (isCurrent) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                                )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Segmented option cards for text/code proposals
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            proposals.forEach { proposal ->
+                                val isThisApproved = answeredProposalId == proposal.id
+                                val isOtherApproved = answeredProposalId != null && !isThisApproved
+                                OutlinedCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .alpha(if (isOtherApproved) 0.55f else 1f),
+                                    colors = if (isThisApproved) {
+                                        CardDefaults.outlinedCardColors(
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                        )
+                                    } else CardDefaults.outlinedCardColors(),
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Text(
+                                                text = proposal.title,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                            if (isThisApproved) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = HugeIcons.CheckmarkCircle01,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp),
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                    Text(
+                                                        text = "Approved",
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        if (!proposal.description.isNullOrBlank()) {
+                                            Text(
+                                                text = proposal.description,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+
+                                        if (!proposal.diff.isNullOrBlank()) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                            ) {
+                                                Text(
+                                                    text = proposal.diff,
+                                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                                    modifier = Modifier.padding(8.dp),
+                                                )
+                                            }
+                                        }
+
+                                        if (isPending && onToolAnswer != null && answeredProposalId == null) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                                    locallyApprovedProposalId = proposal.id
+                                                    val answerPayload = buildJsonObject {
+                                                        put("approved_proposal_id", proposal.id)
+                                                        put("title", proposal.title)
+                                                        put("answers", buildJsonObject {
+                                                            put("proposal", JsonPrimitive(proposal.id))
+                                                        })
+                                                    }
+                                                    onToolAnswer(tool.toolCallId, answerPayload.toString())
+                                                },
+                                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                            ) {
+                                                Icon(
+                                                    imageVector = HugeIcons.CheckmarkCircle01,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp),
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Approve Option ${proposal.title}")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // Submit button
-                if (isPending && onToolAnswer != null) {
-                    FilledTonalButton(
-                        onClick = {
-                            val answerPayload = buildJsonObject {
-                                put("answers", buildJsonObject {
-                                    questions.forEach { q ->
-                                        when (q.selectionType) {
-                                            "multi" -> put(q.id, JsonPrimitive(
-                                                (multiAnswers[q.id].orEmpty().toList() +
-                                                    listOfNotNull(answers[q.id]?.takeIf { it.isNotBlank() }))
-                                                    .joinToString(", ")
-                                            ))
-                                            else -> put(q.id, JsonPrimitive(answers[q.id] ?: ""))
+                // Normal questions if present
+                if (questions.isNotEmpty()) {
+                    questions.forEach { q ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = q.question,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+
+                            if (isPending && onToolAnswer != null && answeredProposalId == null) {
+                                if (q.options.isNotEmpty()) {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        q.options.forEach { option ->
+                                            val selectedOptions = multiAnswers[q.id] ?: emptySet()
+                                            FilterChip(
+                                                selected = if (q.selectionType == "multi") {
+                                                    option in selectedOptions
+                                                } else {
+                                                    answers[q.id] == option
+                                                },
+                                                onClick = {
+                                                    if (q.selectionType == "multi") {
+                                                        multiAnswers[q.id] = if (option in selectedOptions) {
+                                                            selectedOptions - option
+                                                        } else {
+                                                            selectedOptions + option
+                                                        }
+                                                    } else {
+                                                        answers[q.id] = option
+                                                    }
+                                                },
+                                                label = {
+                                                    Text(
+                                                        text = option,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                    )
+                                                },
+                                            )
                                         }
                                     }
-                                })
+                                }
+
+                                OutlinedTextField(
+                                    value = answers[q.id] ?: "",
+                                    onValueChange = { answers[q.id] = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    textStyle = MaterialTheme.typography.bodySmall,
+                                    singleLine = false,
+                                    minLines = 1,
+                                    maxLines = 3,
+                                )
+                            } else if (isAnswered) {
+                                val answeredState = tool.approvalState as ToolApprovalState.Answered
+                                val answerJson = runCatching {
+                                    JsonInstant.parseToJsonElement(answeredState.answer)
+                                }.getOrNull()
+                                val answerText = answerJson?.jsonObject?.get("answers")
+                                    ?.jsonObject?.get(q.id)?.jsonPrimitive?.contentOrNull
+                                    ?: answeredState.answer
+                                Text(
+                                    text = answerText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
                             }
-                            onToolAnswer(tool.toolCallId, answerPayload.toString())
-                        },
-                        enabled = questions.all { q ->
-                            when (q.selectionType) {
-                                "multi" -> !multiAnswers[q.id].isNullOrEmpty() || !answers[q.id].isNullOrBlank()
-                                else -> !answers[q.id].isNullOrBlank()
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.End),
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.Tick01,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = stringResource(R.string.chat_message_tool_submit),
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
+                        }
+                    }
+
+                    // Submit button for normal questions
+                    if (isPending && onToolAnswer != null && answeredProposalId == null) {
+                        FilledTonalButton(
+                            onClick = {
+                                val answerPayload = buildJsonObject {
+                                    put("answers", buildJsonObject {
+                                        questions.forEach { q ->
+                                            when (q.selectionType) {
+                                                "multi" -> put(q.id, JsonPrimitive(
+                                                    (multiAnswers[q.id].orEmpty().toList() +
+                                                        listOfNotNull(answers[q.id]?.takeIf { it.isNotBlank() }))
+                                                        .joinToString(", ")
+                                                ))
+                                                else -> put(q.id, JsonPrimitive(answers[q.id] ?: ""))
+                                            }
+                                        }
+                                    })
+                                }
+                                onToolAnswer(tool.toolCallId, answerPayload.toString())
+                            },
+                            enabled = questions.all { q ->
+                                when (q.selectionType) {
+                                    "multi" -> !multiAnswers[q.id].isNullOrEmpty() || !answers[q.id].isNullOrBlank()
+                                    else -> !answers[q.id].isNullOrBlank()
+                                }
+                            },
+                            modifier = Modifier.align(Alignment.End),
+                        ) {
+                            Icon(
+                                imageVector = HugeIcons.Tick01,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = stringResource(R.string.chat_message_tool_submit),
+                                modifier = Modifier.padding(start = 4.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -723,6 +1046,14 @@ private data class AskUserQuestion(
     val question: String,
     val options: List<String>,
     val selectionType: String = "text", // "text" | "single" | "multi"
+)
+
+private data class AskUserProposal(
+    val id: String,
+    val title: String,
+    val description: String? = null,
+    val imageUrl: String? = null,
+    val diff: String? = null,
 )
 
 @Composable
@@ -770,7 +1101,10 @@ private fun ChainOfThoughtScope.ProposePlanToolStep(
     val isPending = tool.isPending
     val isApproved = tool.approvalState is ToolApprovalState.Approved
     val isDenied = tool.approvalState is ToolApprovalState.Denied
+    var isLocallyApproved by remember { mutableStateOf(false) }
+    val effectiveApproved = isApproved || isLocallyApproved
     val arguments = tool.inputAsJson()
+    val haptic = LocalHapticFeedback.current
 
     val planTitle = remember(arguments) {
         arguments.jsonObject["title"]?.jsonPrimitive?.contentOrNull ?: "Implementation Plan"
@@ -787,6 +1121,20 @@ private fun ChainOfThoughtScope.ProposePlanToolStep(
 
     var expanded by remember { mutableStateOf(true) }
     var showDenyDialog by remember { mutableStateOf(false) }
+
+    // Memoize plan markdown parsing/rendering to prevent Compose re-layout lag on click
+    val memoizedMarkdown = remember(planMarkdown) {
+        movableContentOf {
+            if (planMarkdown.isNotBlank()) {
+                key(planMarkdown) {
+                    MarkdownBlock(
+                        content = planMarkdown,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+    }
 
     ControlledChainOfThoughtStep(
         expanded = expanded,
@@ -853,88 +1201,107 @@ private fun ChainOfThoughtScope.ProposePlanToolStep(
                     }
                 }
 
-                if (planMarkdown.isNotBlank()) {
-                    MarkdownBlock(
-                        content = planMarkdown,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                memoizedMarkdown()
 
-                if (isApproved) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(top = 4.dp),
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.CheckmarkCircle01,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            text = "Plan Approved · Switched to Build mode",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                } else if (isDenied) {
-                    val reason = (tool.approvalState as ToolApprovalState.Denied).reason
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(top = 4.dp),
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.CancelCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.error,
-                        )
-                        Text(
-                            text = if (reason.isNotBlank()) "Plan Declined: $reason" else "Plan Declined",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                } else if (isPending && onToolApproval != null) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) {
-                        FilledTonalButton(
-                            onClick = {
-                                onToolApproval(
-                                    tool.toolCallId,
-                                    true,
-                                    "",
-                                    me.rerere.rikkahub.service.ChatService.ApprovalScope.Once,
-                                    tool.toolName,
+                AnimatedContent(
+                    targetState = when {
+                        effectiveApproved -> "approved"
+                        isDenied -> "denied"
+                        isPending && onToolApproval != null && !isLocallyApproved -> "pending"
+                        else -> "idle"
+                    },
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(220)) togetherWith fadeOut(animationSpec = tween(150))
+                    },
+                    label = "ProposePlanApprovalTransition",
+                ) { state ->
+                    when (state) {
+                        "approved" -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(top = 4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = HugeIcons.CheckmarkCircle01,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary,
                                 )
-                            },
-                        ) {
-                            Icon(
-                                imageVector = HugeIcons.CheckmarkCircle01,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Accept Plan")
+                                Text(
+                                    text = if (isLocallyApproved && !isApproved) {
+                                        "Plan Accepted · Switching to Build mode"
+                                    } else {
+                                        "Plan Approved · Switched to Build mode"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
                         }
+                        "denied" -> {
+                            val reason = (tool.approvalState as? ToolApprovalState.Denied)?.reason ?: ""
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(top = 4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = HugeIcons.CancelCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                                Text(
+                                    text = if (reason.isNotBlank()) "Plan Declined: $reason" else "Plan Declined",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                        "pending" -> {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(top = 8.dp),
+                            ) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                        isLocallyApproved = true
+                                        onToolApproval(
+                                            tool.toolCallId,
+                                            true,
+                                            "",
+                                            me.rerere.rikkahub.service.ChatService.ApprovalScope.Once,
+                                            tool.toolName,
+                                        )
+                                    },
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.CheckmarkCircle01,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Accept Plan")
+                                }
 
-                        OutlinedButton(
-                            onClick = {
-                                showDenyDialog = true
-                            },
-                        ) {
-                            Icon(
-                                imageVector = HugeIcons.Cancel01,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Decline")
+                                OutlinedButton(
+                                    onClick = {
+                                        showDenyDialog = true
+                                    },
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.Cancel01,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Decline")
+                                }
+                            }
                         }
+                        else -> {}
                     }
                 }
             }

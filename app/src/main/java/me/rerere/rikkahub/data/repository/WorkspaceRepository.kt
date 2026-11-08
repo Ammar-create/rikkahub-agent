@@ -247,6 +247,40 @@ class WorkspaceRepository(
         manager.exportFile(workspace.root, path, area, outputStream)
     }
 
+    suspend fun exportWorkspaceArchive(
+        id: String,
+        outputStream: OutputStream,
+    ) = withContext(Dispatchers.IO) {
+        val workspace = dao.getById(id) ?: error("Workspace not found: $id")
+        manager.ensureWorkspace(workspace.root)
+        manager.exportWorkspaceArchive(workspace.root, outputStream)
+    }
+
+    suspend fun importWorkspaceArchive(
+        name: String,
+        inputStream: InputStream,
+    ): WorkspaceEntity = withContext(Dispatchers.IO) {
+        val uniqueName = generateUniqueName(name)
+        val created = create(uniqueName)
+        try {
+            manager.importWorkspaceArchive(created.root, inputStream)
+            created
+        } catch (e: Throwable) {
+            delete(created.id)
+            throw e
+        }
+    }
+
+    private suspend fun generateUniqueName(baseName: String): String {
+        val trimmed = baseName.trim().ifBlank { "Workspace" }
+        if (!isNameTaken(trimmed, excludeId = null)) return trimmed
+        var counter = 2
+        while (isNameTaken("$trimmed ($counter)", excludeId = null)) {
+            counter++
+        }
+        return "$trimmed ($counter)"
+    }
+
     /** 按 Rootfs 内绝对路径读取文件大小, 支持 /workspace、bind mount 与 Rootfs 内部路径 */
     suspend fun rootfsFileSize(
         id: String,

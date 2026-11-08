@@ -154,6 +154,7 @@ class SettingsStore(
         val TRANSLATE_MODEL = stringPreferencesKey("translate_model")
         val ENABLE_SUGGESTION = booleanPreferencesKey("enable_suggestion")
         val IMAGE_GENERATION_MODEL = stringPreferencesKey("image_generation_model")
+        val IMAGE_ASPECT_RATIO = stringPreferencesKey("image_aspect_ratio")
         val TITLE_PROMPT = stringPreferencesKey("title_prompt")
         val TRANSLATION_PROMPT = stringPreferencesKey("translation_prompt")
         val TRANSLATE_THINKING_BUDGET = intPreferencesKey("translate_thinking_budget")
@@ -235,6 +236,11 @@ class SettingsStore(
         // 赞助提醒
         val SPONSOR_ALERT_DISMISSED_AT = intPreferencesKey("sponsor_alert_dismissed_at")
 
+        // 动作系统 (Actions)
+        val DISABLED_BUILTIN_ACTIONS = stringPreferencesKey("disabled_builtin_actions")
+        val CUSTOM_ACTIONS = stringPreferencesKey("custom_actions")
+        val CUSTOM_MODES = stringPreferencesKey("custom_modes")
+
         // Uses the same DataStore singleton without starting settings flows or requiring Koin.
         internal suspend fun restoreBeforeInitialization(context: Context, settings: Settings) {
             require(!settings.init) { "Cannot restore uninitialized settings" }
@@ -261,6 +267,7 @@ class SettingsStore(
                 preferences[TRANSLATE_MODEL] = settings.translateModeId.toString()
                 preferences[ENABLE_SUGGESTION] = settings.enableSuggestion
                 preferences[IMAGE_GENERATION_MODEL] = settings.imageGenerationModelId.toString()
+                preferences[IMAGE_ASPECT_RATIO] = settings.imageAspectRatio
                 preferences[TITLE_PROMPT] = settings.titlePrompt
                 preferences[TRANSLATION_PROMPT] = settings.translatePrompt
                 preferences[TRANSLATE_THINKING_BUDGET] = settings.translateThinkingBudget
@@ -328,6 +335,9 @@ class SettingsStore(
                 preferences[BACKUP_REMINDER_CONFIG] = JsonInstant.encodeToString(settings.backupReminderConfig)
                 preferences[LAUNCH_COUNT] = settings.launchCount
                 preferences[SPONSOR_ALERT_DISMISSED_AT] = settings.sponsorAlertDismissedAt
+                preferences[DISABLED_BUILTIN_ACTIONS] = JsonInstant.encodeToString(settings.disabledBuiltInActions)
+                preferences[CUSTOM_ACTIONS] = JsonInstant.encodeToString(settings.customActions)
+                preferences[CUSTOM_MODES] = JsonInstant.encodeToString(settings.customModes)
             }
         }
     }
@@ -360,6 +370,7 @@ class SettingsStore(
                     ?: DEFAULT_AUTO_MODEL_ID,
                 enableSuggestion = preferences[ENABLE_SUGGESTION] != false,
                 imageGenerationModelId = preferences[IMAGE_GENERATION_MODEL]?.let { runCatching { Uuid.parse(it) }.getOrNull() } ?: Uuid.random(),
+                imageAspectRatio = preferences[IMAGE_ASPECT_RATIO] ?: "auto",
                 titlePrompt = preferences[TITLE_PROMPT] ?: DEFAULT_TITLE_PROMPT,
                 translatePrompt = preferences[TRANSLATION_PROMPT] ?: DEFAULT_TRANSLATION_PROMPT,
                 translateThinkingBudget = preferences[TRANSLATE_THINKING_BUDGET] ?: 0,
@@ -520,6 +531,24 @@ class SettingsStore(
                 } ?: BackupReminderConfig(),
                 launchCount = preferences[LAUNCH_COUNT] ?: 0,
                 sponsorAlertDismissedAt = preferences[SPONSOR_ALERT_DISMISSED_AT] ?: 0,
+                disabledBuiltInActions = preferences[DISABLED_BUILTIN_ACTIONS]?.let { raw ->
+                    runCatching { JsonInstant.decodeFromString<Set<String>>(raw) }.getOrElse {
+                        Log.w(TAG, "Failed to decode disabledBuiltInActions, using default", it)
+                        emptySet()
+                    }
+                } ?: emptySet(),
+                customActions = preferences[CUSTOM_ACTIONS]?.let { raw ->
+                    runCatching { JsonInstant.decodeFromString<List<CustomAction>>(raw) }.getOrElse {
+                        Log.w(TAG, "Failed to decode customActions, using default", it)
+                        emptyList()
+                    }
+                } ?: emptyList(),
+                customModes = preferences[CUSTOM_MODES]?.let { raw ->
+                    runCatching { JsonInstant.decodeFromString<List<CustomMode>>(raw) }.getOrElse {
+                        Log.w(TAG, "Failed to decode customModes, using default", it)
+                        emptyList()
+                    }
+                } ?: emptyList(),
             )
         }
         .map {
@@ -557,6 +586,11 @@ class SettingsStore(
                             // LiteRtLocal is absent - same absent-index fallback as above.
                             val insertAt = providers.indexOfFirst { it is ProviderSetting.LiteRtLocal }
                                 .let { if (it >= 0) it + 1 else providers.indexOfFirst { p -> p is ProviderSetting.AICore } + 1 }
+                            providers.add(insertAt, defaultProvider.copyProvider())
+                        }
+                        is ProviderSetting.NineRouter -> {
+                            val insertAt = providers.indexOfFirst { it is ProviderSetting.LlamaCppLocal }
+                                .let { if (it >= 0) it + 1 else providers.indexOfFirst { p -> p is ProviderSetting.LiteRtLocal } + 1 }
                             providers.add(insertAt, defaultProvider.copyProvider())
                         }
                         else -> providers.add(defaultProvider.copyProvider())
@@ -843,6 +877,7 @@ data class Settings(
     val fastModelId: Uuid = Uuid.random(),
     val fastModelReasoningLevel: ReasoningLevel = ReasoningLevel.AUTO,
     val imageGenerationModelId: Uuid = Uuid.random(),
+    val imageAspectRatio: String = "auto",
     val titlePrompt: String = DEFAULT_TITLE_PROMPT,
     val translateModeId: Uuid = Uuid.random(),
     val translatePrompt: String = DEFAULT_TRANSLATION_PROMPT,
@@ -922,6 +957,9 @@ data class Settings(
     val backupReminderConfig: BackupReminderConfig = BackupReminderConfig(),
     val launchCount: Int = 0,
     val sponsorAlertDismissedAt: Int = 0,
+    val disabledBuiltInActions: Set<String> = emptySet(),
+    val customActions: List<CustomAction> = emptyList(),
+    val customModes: List<CustomMode> = emptyList(),
 ) {
     companion object {
         // 构造一个用于初始化的settings, 但它不能用于保存，防止使用初始值存储
@@ -1052,6 +1090,20 @@ fun List<ProviderSetting>.findModelById(uuid: Uuid): Model? {
 
 fun Settings.getCurrentChatModel(): Model? {
     return findModelById(this.getCurrentAssistant().chatModelId ?: this.chatModelId)
+}
+
+val Settings.defaultImageModelId: Uuid
+    get() = imageGenerationModelId
+
+val Settings.defaultImageModel: Model?
+    get() = findModelById(this.imageGenerationModelId)
+
+fun Settings.getDefaultImageModel(): Model? {
+    return findModelById(this.imageGenerationModelId)
+}
+
+fun Settings.getCurrentImageGenerationModel(): Model? {
+    return findModelById(this.imageGenerationModelId)
 }
 
 private const val FALLBACK_CONTEXT_COMPACTION_TARGET_TOKENS = 2_000

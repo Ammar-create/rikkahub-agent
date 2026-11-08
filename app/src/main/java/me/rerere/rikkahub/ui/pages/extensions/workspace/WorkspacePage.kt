@@ -1,5 +1,9 @@
 package me.rerere.rikkahub.ui.pages.extensions.workspace
 
+import android.provider.OpenableColumns
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +39,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -43,11 +49,12 @@ import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Edit01
 import me.rerere.hugeicons.stroke.File02
+import me.rerere.hugeicons.stroke.FileDownload
+import me.rerere.hugeicons.stroke.FileImport
 import me.rerere.hugeicons.stroke.MoreVertical
+import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
-import androidx.compose.ui.res.stringResource
-import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.RikkaConfirmDialog
 import me.rerere.rikkahub.ui.context.LocalNavController
@@ -58,17 +65,83 @@ import org.koin.androidx.compose.koinViewModel
 @Composable
 fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
     val navController = LocalNavController.current
+    val context = LocalContext.current
     val workspaces by vm.workspaces.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
     var deleteTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
+    var exportTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val fileName = context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0) cursor.getString(nameIndex) else null
+            } else null
+        } ?: uri.lastPathSegment ?: "workspace.tar.gz"
+        val suggestedName = fileName
+            .removeSuffix(".tar.gz")
+            .removeSuffix(".tgz")
+            .ifBlank { "Workspace" }
+        val inputStream = context.contentResolver.openInputStream(uri) ?: return@rememberLauncherForActivityResult
+        vm.importWorkspace(
+            inputStream = inputStream,
+            suggestedName = suggestedName,
+            onSuccess = {
+                Toast.makeText(context, context.getString(R.string.workspace_import_success), Toast.LENGTH_SHORT).show()
+            },
+            onError = { error ->
+                Toast.makeText(context, error.message ?: context.getString(R.string.workspace_import_failed), Toast.LENGTH_LONG).show()
+            }
+        )
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/gzip"),
+    ) { uri ->
+        val target = exportTarget.also { exportTarget = null } ?: return@rememberLauncherForActivityResult
+        if (uri == null) return@rememberLauncherForActivityResult
+        val outputStream = context.contentResolver.openOutputStream(uri) ?: return@rememberLauncherForActivityResult
+        vm.exportWorkspace(
+            workspace = target,
+            outputStream = outputStream,
+            onSuccess = {
+                Toast.makeText(context, context.getString(R.string.workspace_export_success), Toast.LENGTH_SHORT).show()
+            },
+            onError = { error ->
+                Toast.makeText(context, error.message ?: context.getString(R.string.workspace_export_failed), Toast.LENGTH_LONG).show()
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text(stringResource(R.string.workspace_page_title)) },
                 navigationIcon = { BackButton() },
+                actions = {
+                    IconButton(onClick = {
+                        importLauncher.launch(
+                            arrayOf(
+                                "application/gzip",
+                                "application/x-gzip",
+                                "application/tar+gzip",
+                                "application/x-tar",
+                                "application/octet-stream",
+                                "*/*",
+                            )
+                        )
+                    }) {
+                        Icon(
+                            imageVector = HugeIcons.FileImport,
+                            contentDescription = stringResource(R.string.workspace_page_import),
+                        )
+                    }
+                },
                 scrollBehavior = scrollBehavior,
                 colors = CustomColors.topBarColors,
             )
@@ -97,6 +170,10 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
                     workspace = workspace,
                     onRename = { editTarget = workspace },
                     onDelete = { deleteTarget = workspace },
+                    onExport = {
+                        exportTarget = workspace
+                        exportLauncher.launch("${workspace.name}.tar.gz")
+                    },
                     onOpen = { navController.navigate(Screen.WorkspaceDetail(workspace.id)) },
                 )
             }
@@ -177,6 +254,7 @@ private fun WorkspaceCard(
     workspace: WorkspaceEntity,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onExport: () -> Unit,
     onOpen: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -230,6 +308,14 @@ private fun WorkspaceCard(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false },
                     ) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.workspace_card_export_archive)) },
+                            leadingIcon = { Icon(HugeIcons.FileDownload, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onExport()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.common_rename)) },
                             leadingIcon = { Icon(HugeIcons.Edit01, contentDescription = null) },

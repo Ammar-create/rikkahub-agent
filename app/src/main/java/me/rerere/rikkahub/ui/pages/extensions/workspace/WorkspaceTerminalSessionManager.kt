@@ -79,6 +79,7 @@ class WorkspaceTerminalSessionManager internal constructor(
         closedTab?.let { tab ->
             tab.client.terminalView = null
             tab.session.finishIfRunning()
+            me.rerere.rikkahub.workspace.audio.WorkspaceAudioBridge.getInstance(appContext).release()
         }
     }
 
@@ -95,6 +96,7 @@ class WorkspaceTerminalSessionManager internal constructor(
         state.tabs.forEach { tab ->
             tab.client.terminalView = null
             tab.session.finishIfRunning()
+            me.rerere.rikkahub.workspace.audio.WorkspaceAudioBridge.getInstance(appContext).release()
         }
     }
 
@@ -179,6 +181,7 @@ class WorkspaceTerminalSessionManager internal constructor(
             session = session,
             client = client,
         )
+        me.rerere.rikkahub.workspace.audio.WorkspaceAudioBridge.getInstance(appContext).acquire()
         updateState(root) { state ->
             state.copy(
                 tabs = state.tabs + tab,

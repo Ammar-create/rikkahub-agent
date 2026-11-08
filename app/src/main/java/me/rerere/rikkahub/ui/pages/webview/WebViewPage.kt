@@ -47,7 +47,7 @@ import me.rerere.rikkahub.ui.theme.JetbrainsMono
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WebViewPage(url: String, contentId: String) {
+fun WebViewPage(url: String, contentId: String, title: String = "") {
     val context = LocalContext.current
     val state = if (url.isNotEmpty()) {
         rememberWebViewState(
@@ -88,8 +88,10 @@ fun WebViewPage(url: String, contentId: String) {
             TopAppBar(
                 title = {
                     Text(
-                        text = state.pageTitle?.takeIf { it.isNotEmpty() } ?: state.currentUrl
-                        ?: "",
+                        text = title.takeIf { it.isNotBlank() }
+                            ?: state.pageTitle?.takeIf { it.isNotEmpty() }
+                            ?: state.currentUrl
+                            ?: "",
                         maxLines = 1,
                         style = MaterialTheme.typography.titleSmall
                     )

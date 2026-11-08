@@ -25,8 +25,10 @@ import kotlinx.serialization.json.contentOrNull
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.common.http.jsonObjectOrNull
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.Tools
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.ui.components.media.StudioHeroMediaCard
 import me.rerere.rikkahub.ui.components.richtext.HighlightCodeBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.ui.FormItem
@@ -80,6 +82,74 @@ interface ToolUIRenderer {
     }
 }
 
+object GenerateImageToolUI : ToolUIRenderer {
+    override val toolName: String = "generate_image"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Image02
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val prompt = context.arguments.getStringContent("prompt")
+        return if (!prompt.isNullOrBlank()) {
+            stringResource(R.string.chat_message_tool_generate_image_prompt, prompt)
+        } else {
+            stringResource(R.string.chat_message_tool_generate_image_title)
+        }
+    }
+
+    override fun hasSummary(context: ToolUIContext): Boolean =
+        context.tool.output.any { it is UIMessagePart.Image }
+
+    @Composable
+    override fun Summary(context: ToolUIContext) {
+        val images = context.tool.output.filterIsInstance<UIMessagePart.Image>()
+        if (images.isNotEmpty()) {
+            StudioHeroMediaCard(
+                images = images.map { it.url },
+                aspectRatio = images.firstOrNull()?.metadata?.get("aspect_ratio")?.jsonPrimitiveOrNull?.contentOrNull
+                    ?: context.arguments.getStringContent("aspect_ratio"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+            )
+        }
+    }
+
+    @Composable
+    override fun Preview(context: ToolUIContext, onDismissRequest: () -> Unit) {
+        val images = context.tool.output.filterIsInstance<UIMessagePart.Image>()
+        Column(
+            modifier = Modifier
+                .fillMaxHeight(0.85f)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = stringResource(R.string.chat_message_tool_generate_image_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+
+            if (images.isNotEmpty()) {
+                StudioHeroMediaCard(
+                    images = images.map { it.url },
+                    aspectRatio = images.firstOrNull()?.metadata?.get("aspect_ratio")?.jsonPrimitiveOrNull?.contentOrNull
+                        ?: context.arguments.getStringContent("aspect_ratio"),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            DefaultToolPreview(context = context)
+        }
+    }
+}
+
 /** 未注册工具使用的默认渲染器, 全部行为来自 [ToolUIRenderer] 的默认实现 */
 private object DefaultToolUIRenderer : ToolUIRenderer {
     override val toolName: String get() = ""
@@ -114,6 +184,7 @@ object ToolUIRegistry {
         SendEmailIntentToolUI,
         OpenWifiSettingsToolUI,
         ShowLocationOnMapToolUI,
+        GenerateImageToolUI,
     ).associateBy { it.toolName }
 
     /** 查找工具对应的渲染器, 未注册时返回默认渲染器 */
@@ -182,9 +253,9 @@ fun DefaultToolPreview(
                                 style = TextStyle(fontSize = 10.sp, lineHeight = 12.sp)
                             )
 
-                            is UIMessagePart.Image -> ZoomableAsyncImage(
-                                model = part.url,
-                                contentDescription = null,
+                            is UIMessagePart.Image -> StudioHeroMediaCard(
+                                images = listOf(part.url),
+                                aspectRatio = part.metadata?.get("aspect_ratio")?.jsonPrimitiveOrNull?.contentOrNull,
                                 modifier = Modifier.fillMaxWidth(),
                             )
 

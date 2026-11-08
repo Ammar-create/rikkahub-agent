@@ -20,14 +20,29 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
+import me.rerere.ai.provider.ImageGenerationParams
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelType
+import me.rerere.ai.provider.ProviderManager
+import me.rerere.ai.ui.ImageAspectRatio
+import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.datastore.getDefaultImageModel
+import me.rerere.rikkahub.data.datastore.findProvider
+import me.rerere.rikkahub.data.datastore.matchesPickerType
+import me.rerere.rikkahub.data.db.entity.GenMediaEntity
+import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.repository.GenMediaRepository
+import java.io.File
 import me.rerere.rikkahub.data.ai.tools.local.BiometricResultBuffer
 import me.rerere.rikkahub.data.ai.tools.local.CameraResultBuffer
 import me.rerere.rikkahub.data.ai.tools.local.InteractiveToolStreamer
@@ -204,6 +219,7 @@ sealed class LocalToolOption {
     @Serializable @SerialName("external_storage")     data object ExternalStorage     : LocalToolOption()
     @Serializable @SerialName("archive")              data object Archive             : LocalToolOption()
     @Serializable @SerialName("keyboard_control")     data object KeyboardControl     : LocalToolOption()
+    @Serializable @SerialName("image_generation")     data object ImageGeneration     : LocalToolOption()
 }
 
 /**
@@ -375,7 +391,20 @@ class LocalTools(
     private val okHttpClient: okhttp3.OkHttpClient,
     // agent-keyboard IPC client — backs the keyboard_* tools (drives the active text field).
     private val keyboardApiClient: me.rerere.rikkahub.data.keyboard.KeyboardApiClient,
+    private val providerManager: me.rerere.ai.provider.ProviderManager,
+    private val filesManager: me.rerere.rikkahub.data.files.FilesManager,
+    private val genMediaRepository: me.rerere.rikkahub.data.repository.GenMediaRepository,
 ) {
+    val generateImageTool by lazy {
+        createGenerateImageTool(
+            context = context,
+            settingsStore = settingsStore,
+            providerManager = providerManager,
+            filesManager = filesManager,
+            genMediaRepository = genMediaRepository,
+        )
+    }
+
     val javascriptTool by lazy {
         Tool(
             name = "eval_javascript",
@@ -640,14 +669,15 @@ class LocalTools(
                 Ask the user one or more questions when you need clarification, additional information, or confirmation.
                 Each question can optionally provide a list of suggested options for the user to choose from.
                 The user may select an option or provide their own free-text answer for each question.
-                The answers will be returned as a JSON object mapping question IDs to the user's responses.
+                Additionally or alternatively, proposals can be presented for A/B decisions, design mockups, or code diffs.
+                The answers will be returned as a JSON object mapping question IDs to the user's responses, or the approved proposal ID.
             """.trimIndent().replace("\n", " "),
             parameters = {
                 InputSchema.Obj(
                     properties = buildJsonObject {
                         put("questions", buildJsonObject {
                             put("type", "array")
-                            put("description", "List of questions to ask the user")
+                            put("description", "Optional list of questions to ask the user")
                             put("items", buildJsonObject {
                                 put("type", "object")
                                 put("properties", buildJsonObject {
@@ -691,8 +721,41 @@ class LocalTools(
                                 })
                             })
                         })
+                        put("proposals", buildJsonObject {
+                            put("type", "array")
+                            put("description", "Optional list of proposal choices for A/B decisions, mockups, or code diffs")
+                            put("items", buildJsonObject {
+                                put("type", "object")
+                                put("properties", buildJsonObject {
+                                    put("id", buildJsonObject {
+                                        put("type", "string")
+                                        put("description", "Unique identifier for this proposal")
+                                    })
+                                    put("title", buildJsonObject {
+                                        put("type", "string")
+                                        put("description", "Title or label of the proposal")
+                                    })
+                                    put("description", buildJsonObject {
+                                        put("type", "string")
+                                        put("description", "Optional description or rationale of the proposal")
+                                    })
+                                    put("image_url", buildJsonObject {
+                                        put("type", "string")
+                                        put("description", "Optional image URL for visual mockups or design proposals")
+                                    })
+                                    put("diff", buildJsonObject {
+                                        put("type", "string")
+                                        put("description", "Optional code diff or text changes to review")
+                                    })
+                                })
+                                put("required", kotlinx.serialization.json.buildJsonArray {
+                                    add("id")
+                                    add("title")
+                                })
+                            })
+                        })
                     },
-                    required = listOf("questions")
+                    required = emptyList()
                 )
             },
             needsApproval = { true },
@@ -1123,6 +1186,9 @@ class LocalTools(
             tools.add(keyboardSetCursorTool(keyboardApiClient))
             tools.add(keyboardSelectRangeTool(keyboardApiClient))
         }
+        if (options.contains(LocalToolOption.ImageGeneration)) {
+            tools.add(generateImageTool)
+        }
         // Centralised opt-in to needsApproval. Tool factories themselves don't have to know
         // whether their op is destructive — ToolApprovalDefaults is the single source of
         // truth, and the GenerationHandler / Telegram/in-app prompt path keys off needsApproval.
@@ -1136,3 +1202,187 @@ class LocalTools(
         }
     }
 }
+
+internal fun createGenerateImageTool(
+    context: Context,
+    settingsStore: SettingsStore,
+    providerManager: ProviderManager,
+    filesManager: FilesManager,
+    genMediaRepository: GenMediaRepository,
+): Tool = Tool(
+    name = "generate_image",
+    description = """
+        Generate studio-grade images autonomously based on a descriptive prompt.
+        When aspect_ratio is 'auto', pick the ratio fitting the use case: 9:16 for mobile UI mockups/vertical screens, 16:9 for desktop hero/landscape, 1:1 for icons/avatars/logos, 2:3 for posters.
+    """.trimIndent().replace("\n", " "),
+    parameters = {
+        InputSchema.Obj(
+            properties = buildJsonObject {
+                put("prompt", buildJsonObject {
+                    put("type", "string")
+                    put("description", "Description of the image to create.")
+                })
+                put("aspect_ratio", buildJsonObject {
+                    put("type", "string")
+                    put("enum", buildJsonArray {
+                        add(JsonPrimitive("auto"))
+                        add(JsonPrimitive("1:1"))
+                        add(JsonPrimitive("16:9"))
+                        add(JsonPrimitive("9:16"))
+                        add(JsonPrimitive("2:3"))
+                        add(JsonPrimitive("3:2"))
+                    })
+                    put("description", "Aspect ratio for the generated image. Defaults to 'auto'.")
+                })
+                put("count", buildJsonObject {
+                    put("type", "integer")
+                    put("minimum", 1)
+                    put("maximum", 4)
+                    put("description", "Number of image variations to generate (1..4). Defaults to 1.")
+                })
+                put("model", buildJsonObject {
+                    put("type", "string")
+                    put("description", "Optional override for the image model. Defaults to the configured image model in Settings.")
+                })
+            },
+            required = listOf("prompt")
+        )
+    },
+    execute = { input ->
+        val prompt = input.jsonObject["prompt"]?.jsonPrimitive?.contentOrNull
+            ?: return@Tool listOf(UIMessagePart.Text("Error: 'prompt' parameter is required"))
+        val rawAspectRatio = input.jsonObject["aspect_ratio"]?.jsonPrimitive?.contentOrNull ?: "auto"
+        val count = (input.jsonObject["count"]?.jsonPrimitive?.intOrNull ?: 1).coerceIn(1, 4)
+        val modelOverride = input.jsonObject["model"]?.jsonPrimitive?.contentOrNull
+
+        val settings = settingsStore.settingsFlow.first()
+
+        // Autonomous aspect ratio resolution
+        val effectiveRatio = if (rawAspectRatio.equals("auto", ignoreCase = true)) {
+            val pLower = prompt.lowercase()
+            when {
+                pLower.contains("mobile") || pLower.contains("phone") || pLower.contains("vertical") ||
+                pLower.contains("screen") || pLower.contains("tiktok") || pLower.contains("reel") ||
+                pLower.contains("story") || pLower.contains("wallpaper") -> "9:16"
+
+                pLower.contains("desktop") || pLower.contains("hero") || pLower.contains("landscape") ||
+                pLower.contains("banner") || pLower.contains("wide") || pLower.contains("scenery") -> "16:9"
+
+                pLower.contains("poster") || pLower.contains("portrait") || pLower.contains("character") ||
+                pLower.contains("cover") -> "2:3"
+
+                pLower.contains("icon") || pLower.contains("avatar") || pLower.contains("logo") ||
+                pLower.contains("profile") || pLower.contains("sticker") -> "1:1"
+
+                settings.imageAspectRatio.isNotBlank() && !settings.imageAspectRatio.equals("auto", ignoreCase = true) ->
+                    settings.imageAspectRatio
+
+                else -> "1:1"
+            }
+        } else {
+            rawAspectRatio
+        }
+
+        val mappedRatio = when (effectiveRatio) {
+            "16:9", "3:2" -> ImageAspectRatio.LANDSCAPE
+            "9:16", "2:3" -> ImageAspectRatio.PORTRAIT
+            else -> ImageAspectRatio.SQUARE
+        }
+
+        // Model resolution
+        val targetModel: Model? = if (!modelOverride.isNullOrBlank()) {
+            settings.providers.flatMap { it.models }.firstOrNull {
+                it.displayName.equals(modelOverride, ignoreCase = true) ||
+                it.modelId.equals(modelOverride, ignoreCase = true)
+            } ?: settings.getDefaultImageModel()
+        } else {
+            settings.getDefaultImageModel()
+                ?: settings.providers.flatMap { it.models }.firstOrNull { it.matchesPickerType(ModelType.IMAGE) }
+        }
+
+        if (targetModel == null) {
+            return@Tool listOf(
+                UIMessagePart.Text("Error: No image generation model available. Please configure an image model in Settings -> Models.")
+            )
+        }
+
+        val provider = targetModel.findProvider(settings.providers)
+            ?: return@Tool listOf(
+                UIMessagePart.Text("Error: Provider for model '${targetModel.displayName}' not found.")
+            )
+
+        val params = ImageGenerationParams(
+            model = targetModel,
+            prompt = prompt,
+            numOfImages = count,
+            aspectRatio = mappedRatio,
+            customHeaders = targetModel.customHeaders,
+            customBody = targetModel.customBodies,
+        )
+
+        try {
+            val flow = providerManager.getProviderByType(provider).generateImage(provider, params)
+            val generatedFiles = mutableListOf<File>()
+            val imagesDir = filesManager.getImagesDir()
+            val timestamp = System.currentTimeMillis()
+            val safeName = targetModel.displayName.map { c ->
+                if (c in charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|') || c.isISOControl()) '_' else c
+            }.joinToString("")
+            var idx = 0
+
+            flow.collect { item ->
+                if (!item.partial) {
+                    val file = File(imagesDir, "${timestamp}_${safeName}_$idx.png")
+                    val created = filesManager.createImageFileFromBase64(item.data, file.absolutePath)
+                    genMediaRepository.insertMedia(
+                        GenMediaEntity(
+                            path = "images/${file.name}",
+                            modelId = targetModel.displayName,
+                            prompt = prompt,
+                            createAt = timestamp,
+                            type = GenMediaEntity.TYPE_IMAGE_GENERATION,
+                        )
+                    )
+                    generatedFiles.add(created)
+                    idx++
+                }
+            }
+
+            if (generatedFiles.isEmpty()) {
+                return@Tool listOf(
+                    UIMessagePart.Text("Error: Image generation completed without producing any output images.")
+                )
+            }
+
+            val parts = mutableListOf<UIMessagePart>()
+            val summary = buildJsonObject {
+                put("status", "success")
+                put("prompt", prompt)
+                put("model", targetModel.displayName)
+                put("aspect_ratio", effectiveRatio)
+                put("count", generatedFiles.size)
+                put("images", buildJsonArray {
+                    generatedFiles.forEach { add(JsonPrimitive("file://${it.absolutePath}")) }
+                })
+            }
+            parts.add(UIMessagePart.Text(summary.toString()))
+
+            generatedFiles.forEach { file ->
+                parts.add(
+                    UIMessagePart.Image(
+                        url = "file://${file.absolutePath}",
+                        metadata = buildJsonObject {
+                            put("prompt", prompt)
+                            put("model", targetModel.displayName)
+                            put("aspect_ratio", effectiveRatio)
+                            put("count", generatedFiles.size)
+                        }
+                    )
+                )
+            }
+            parts
+        } catch (e: Exception) {
+            listOf(UIMessagePart.Text("Error during image generation: ${e.message ?: e.toString()}"))
+        }
+    }
+)

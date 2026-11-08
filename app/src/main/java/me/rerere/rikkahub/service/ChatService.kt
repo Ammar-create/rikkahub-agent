@@ -423,6 +423,7 @@ class ChatService(
     private val toolApprovalPreferences: me.rerere.rikkahub.data.preferences.ToolApprovalPreferences,
     private val workspaceRepository: WorkspaceRepository,
     private val folderRepository: FolderRepository,
+    private val nineRouterService: me.rerere.ai.provider.providers.ninerouter.NineRouterService? = null,
 ) {
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构造)
     private val workspaceReminderTransformer = WorkspaceReminderTransformer(workspaceRepository)
@@ -1528,6 +1529,20 @@ class ChatService(
             )
         }
 
+        // Auto-Wake on Prompt Send for 9Router
+        if (nineRouterService != null && nineRouterService.isNineRouter(resolvedProvider)) {
+            val isOnline = nineRouterService.isOnline()
+            if (!isOnline) {
+                val session = getOrCreateSession(conversationId)
+                session.processingStatus.value = "Waking up 9Router... (starting local gateway)"
+                try {
+                    nineRouterService.start()
+                } finally {
+                    session.processingStatus.value = null
+                }
+            }
+        }
+
         val senderName = if (assistant.useAssistantAvatar) {
             assistant.name.ifEmpty { context.getString(R.string.assistant_page_default_assistant) }
         } else {
@@ -2008,8 +2023,18 @@ class ChatService(
             }
 
             it.printStackTrace()
-            addError(it, conversationId, title = context.getString(R.string.error_title_generation))
-            Logging.log(TAG, "handleMessageComplete: $it")
+            val errorToReport = if (nineRouterService != null && nineRouterService.isNineRouter(resolvedProvider)) {
+                val cleanMessage = it.message ?: "Gateway error"
+                if (!cleanMessage.startsWith("[9Router:")) {
+                    RuntimeException(nineRouterService.formatUpstreamError(cleanMessage), it)
+                } else {
+                    it
+                }
+            } else {
+                it
+            }
+            addError(errorToReport, conversationId, title = context.getString(R.string.error_title_generation))
+            Logging.log(TAG, "handleMessageComplete: $errorToReport")
             Logging.log(TAG, it.stackTraceToString())
         }.onSuccess {
             val finalConversation = getConversationFlow(conversationId).value
@@ -2620,6 +2645,36 @@ class ChatService(
             conversation = conversation,
             additionalPrompt = additionalPrompt,
             targetTokens = targetTokens,
+            keepRecentMessages = keepRecentMessages,
+        ).onFailure {
+            addError(
+                it,
+                conversationId = conversationId,
+                title = context.getString(R.string.error_title_compress_conversation),
+            )
+        }
+    }
+
+    /**
+     * Trigger manual context compaction for a conversation with default target tokens.
+     */
+    fun manualCompact(
+        conversationId: Uuid,
+        additionalPrompt: String = "",
+        targetTokens: Int? = null,
+        keepRecentMessages: Int = 32,
+    ): Deferred<Result<Unit>> = appScope.async {
+        val settings = settingsStore.settingsFlow.first()
+        val model = resolveCompressionModel(settings)
+        val defaultTokens = settings.getContextCompactionTargetTokens(
+            model?.let { compactionContextLength(settings, it) }
+        )
+        val latestConversation = getConversationFlow(conversationId).value
+        compressConversation(
+            conversationId = conversationId,
+            conversation = latestConversation,
+            additionalPrompt = additionalPrompt,
+            targetTokens = targetTokens ?: defaultTokens,
             keepRecentMessages = keepRecentMessages,
         ).onFailure {
             addError(

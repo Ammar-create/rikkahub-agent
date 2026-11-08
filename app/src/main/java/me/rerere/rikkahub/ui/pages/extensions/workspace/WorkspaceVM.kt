@@ -38,4 +38,38 @@ class WorkspaceVM(
             repository.delete(workspace.id)
         }
     }
+
+    fun importWorkspace(
+        inputStream: java.io.InputStream,
+        suggestedName: String,
+        onSuccess: ((WorkspaceEntity) -> Unit)? = null,
+        onError: ((Throwable) -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                repository.importWorkspaceArchive(suggestedName, inputStream)
+            }.onSuccess { workspace ->
+                onSuccess?.invoke(workspace)
+            }.onFailure { error ->
+                onError?.invoke(error)
+            }
+        }
+    }
+
+    fun exportWorkspace(
+        workspace: WorkspaceEntity,
+        outputStream: java.io.OutputStream,
+        onSuccess: (() -> Unit)? = null,
+        onError: ((Throwable) -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                repository.exportWorkspaceArchive(workspace.id, outputStream)
+            }.onSuccess {
+                onSuccess?.invoke()
+            }.onFailure { error ->
+                onError?.invoke(error)
+            }
+        }
+    }
 }

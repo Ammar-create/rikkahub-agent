@@ -131,6 +131,16 @@ private fun ModelSettingsPage(settings: Settings, vm: SettingVM, contentPadding:
         }
         item {
             ModelSettingItem(
+                title = stringResource(R.string.setting_model_page_image_model),
+                description = stringResource(R.string.setting_model_page_image_model_desc),
+                modelId = settings.imageGenerationModelId,
+                providers = settings.providers,
+                modelType = ModelType.IMAGE,
+                onSelect = { vm.updateSettings(settings.copy(imageGenerationModelId = it.id)) },
+            )
+        }
+        item {
+            ModelSettingItem(
                 title = stringResource(R.string.setting_model_page_fast_model),
                 description = stringResource(R.string.setting_model_page_fast_model_desc),
                 modelId = settings.fastModelId,
@@ -498,11 +508,12 @@ private fun ModelSettingItem(
     onSelect: (Model) -> Unit,
     reasoningLevel: ReasoningLevel? = null,
     onUpdateReasoningLevel: ((ReasoningLevel) -> Unit)? = null,
+    modelType: ModelType = ModelType.CHAT,
 ) {
     val state = rememberModelListState(
         modelId = modelId,
         providers = providers,
-        type = ModelType.CHAT,
+        type = modelType,
     )
 
     Column {

@@ -20,4 +20,10 @@ object ToolRuntimeLimits {
      * which truncated long Termux chains mid-task (issue #22).
      */
     @Volatile var maxToolSteps: Int = TermuxDefaults.DEFAULT_MAX_TOOL_STEPS
+
+    /**
+     * Inactivity watchdog timeout in ms. If an active turn makes no progress (no tool started or
+     * completed, no token activity) for longer than this duration, it is considered hung and force-ended.
+     */
+    @Volatile var idleTimeoutMs: Long = 5L * 60_000L
 }

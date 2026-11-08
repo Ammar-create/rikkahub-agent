@@ -66,6 +66,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
+import me.rerere.rikkahub.ui.hooks.ActionPill
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -144,6 +146,8 @@ fun ChatInput(
     onStartVoiceMode: (() -> Unit)? = null,
     voiceState: VoiceSessionState = VoiceSessionState(),
     onStopVoiceMode: () -> Unit = {},
+    onRemovePill: (ActionPill) -> Unit = { state.removeActionPill(it) },
+    onUpdateSettings: (Settings) -> Unit = {},
 ) {
     val toaster = LocalToaster.current
     val assistant = settings.getCurrentAssistant()
@@ -261,6 +265,7 @@ fun ChatInput(
                         state = state,
                         completionProviders = completionProviders,
                         onSendMessage = { sendMessage() },
+                        onRemovePill = onRemovePill,
                     )
 
                     Row(
@@ -283,13 +288,17 @@ fun ChatInput(
                                 modifier = Modifier,
                             )
 
-                            // Search
+                            // Tools
                             val enableSearchMsg = stringResource(R.string.web_search_enabled)
                             val disableSearchMsg = stringResource(R.string.web_search_disabled)
+                            val imageGenEnabledMsg = stringResource(R.string.tools_picker_image_gen_enabled)
+                            val imageGenDisabledMsg = stringResource(R.string.tools_picker_image_gen_disabled)
                             val chatModel = settings.getCurrentChatModel()
-                            SearchPickerButton(
+                            ToolsPickerButton(
                                 enableSearch = enableSearch,
                                 settings = settings,
+                                assistant = assistant,
+                                model = chatModel,
                                 onUpdateSearchMode = { mode ->
                                     onUpdateSearchMode(mode)
                                     val enabled = mode != SearchMode.OFF
@@ -304,7 +313,25 @@ fun ChatInput(
                                     )
                                 },
                                 onUpdateSearchService = onUpdateSearchService,
-                                model = chatModel,
+                                onUpdateImageGeneration = { enabled ->
+                                    val newTools = if (enabled) {
+                                        (assistant.localTools + LocalToolOption.ImageGeneration).distinct()
+                                    } else {
+                                        assistant.localTools - LocalToolOption.ImageGeneration
+                                    }
+                                    onUpdateAssistant(assistant.copy(localTools = newTools))
+                                    toaster.show(
+                                        message = if (enabled) imageGenEnabledMsg else imageGenDisabledMsg,
+                                        duration = 1.seconds,
+                                        type = if (enabled) ToastType.Success else ToastType.Normal
+                                    )
+                                },
+                                onUpdateImageModel = { model ->
+                                    onUpdateSettings(settings.copy(imageGenerationModelId = model.id))
+                                },
+                                onUpdateImageAspectRatio = { ratio ->
+                                    onUpdateSettings(settings.copy(imageAspectRatio = ratio))
+                                },
                             )
 
                             // Reasoning
@@ -455,6 +482,7 @@ private fun TextInputRow(
     state: ChatInputState,
     completionProviders: List<ChatCompletionProvider>,
     onSendMessage: () -> Unit,
+    onRemovePill: (ActionPill) -> Unit = { state.removeActionPill(it) },
 ) {
     val settings = LocalSettings.current
     val assistant = settings.getCurrentAssistant()
@@ -537,6 +565,7 @@ private fun TextInputRow(
                 completionList = list,
                 onItemClick = { item ->
                     state.applyCompletion(list.replacementRange, item)
+                    item.onSelect?.invoke()
                     completionList = null
                 },
             )
@@ -555,6 +584,14 @@ private fun TextInputRow(
             placeholder = {
                 Text(stringResource(R.string.chat_input_placeholder))
             },
+            prefix = if (state.actionPills.isNotEmpty()) {
+                {
+                    InlineActionPills(
+                        pills = state.actionPills,
+                        onRemovePill = onRemovePill,
+                    )
+                }
+            } else null,
             lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Sentences,
@@ -691,8 +728,10 @@ private fun CompletionPopup(
                         ) {
                             Text(
                                 text = item.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 2,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                ),
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             item.detail?.let { detail ->
@@ -705,6 +744,61 @@ private fun CompletionPopup(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineActionPills(
+    pills: List<ActionPill>,
+    onRemovePill: (ActionPill) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.padding(end = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        pills.forEach { pill ->
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = pill.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = pill.label,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                        ),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .clickable { onRemovePill(pill) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = HugeIcons.Cancel01,
+                            contentDescription = "Remove",
+                            modifier = Modifier.size(9.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+                        )
                     }
                 }
             }
@@ -824,6 +918,14 @@ private fun FullScreenEditor(
                         placeholder = {
                             Text(stringResource(R.string.chat_input_placeholder))
                         },
+                        prefix = if (state.actionPills.isNotEmpty()) {
+                            {
+                                InlineActionPills(
+                                    pills = state.actionPills,
+                                    onRemovePill = { state.removeActionPill(it) },
+                                )
+                            }
+                        } else null,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Sentences,
                         ),

@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -38,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,18 +57,30 @@ import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.ui.components.nav.BackButton
+import me.rerere.rikkahub.ui.components.ui.ImagePreviewDialog
+import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.ColorMode
 import me.rerere.rikkahub.ui.theme.RikkahubTheme
+import me.rerere.workspace.WorkspaceManager
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 @Composable
 fun WorkspaceTerminalPage(id: String) {
+    val navController = LocalNavController.current
     val vm: WorkspaceDetailVM = koinViewModel(parameters = { parametersOf(id) })
+    val workspaceManager: WorkspaceManager = koinInject()
+    val scope = rememberCoroutineScope()
     val state by vm.state.collectAsStateWithLifecycle()
     val sessionManager: WorkspaceTerminalSessionManager = koinInject()
     val root = state.workspace?.root
@@ -77,10 +91,36 @@ fun WorkspaceTerminalPage(id: String) {
         initialValue = WorkspaceTerminalTabsState(),
     )
     var pendingCloseTabId by remember(root) { mutableStateOf<Long?>(null) }
+    var previewImageUri by remember { mutableStateOf<String?>(null) }
 
     val shellCompatibilityMode = state.workspace?.shellCompatibilityMode ?: false
     LaunchedEffect(root, shellCompatibilityMode) {
         root?.let { sessionManager.ensureSession(it, shellCompatibilityMode) }
+    }
+
+    val onOpenDesktop: () -> Unit = {
+        if (root != null) {
+            scope.launch {
+                val running = withContext(Dispatchers.IO) {
+                    workspaceManager.isX11DisplayRunning(root)
+                }
+                if (!running) {
+                    withContext(Dispatchers.IO) {
+                        workspaceManager.startX11Display(root)
+                        for (i in 1..10) {
+                            kotlinx.coroutines.delay(300)
+                            if (workspaceManager.isX11DisplayRunning(root)) break
+                        }
+                    }
+                }
+                navController.navigate(
+                    Screen.WebView(
+                        url = "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=remote",
+                        title = "Workspace Desktop",
+                    )
+                )
+            }
+        }
     }
 
     RikkahubTheme(colorMode = ColorMode.DARK) {
@@ -96,6 +136,15 @@ fun WorkspaceTerminalPage(id: String) {
                 onCloseTab = { tabId ->
                     pendingCloseTabId = tabId
                 },
+                onOpenDesktop = onOpenDesktop,
+                onImagePreview = { uri -> previewImageUri = uri },
+            )
+        }
+
+        previewImageUri?.let { uri ->
+            ImagePreviewDialog(
+                images = listOf(uri),
+                onDismissRequest = { previewImageUri = null },
             )
         }
 
@@ -143,6 +192,8 @@ private fun WorkspaceTerminalContent(
     onCreateTab: () -> Unit,
     onSelectTab: (Long) -> Unit,
     onCloseTab: (Long) -> Unit,
+    onOpenDesktop: () -> Unit,
+    onImagePreview: (String) -> Unit,
 ) {
     val selectedIndex = state.tabs.indexOfFirst { it.id == state.selectedTabId }
         .takeIf { it >= 0 }
@@ -234,6 +285,19 @@ private fun WorkspaceTerminalContent(
                         }
                     }
                 }
+                IconButton(
+                    onClick = onOpenDesktop,
+                    enabled = root != null,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .semantics { contentDescription = "Desktop GUI" },
+                ) {
+                    Icon(
+                        HugeIcons.ComputerTerminal01,
+                        contentDescription = "Desktop GUI",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
                 val newTabDescription = stringResource(R.string.workspace_terminal_new_tab)
                 IconButton(
                     onClick = onCreateTab,
@@ -248,6 +312,8 @@ private fun WorkspaceTerminalContent(
             if (selectedTab != null) {
                 WorkspaceTerminalTabContent(
                     tab = selectedTab,
+                    root = root,
+                    onImagePreview = onImagePreview,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
@@ -282,6 +348,8 @@ private fun WorkspaceTerminalContent(
 @Composable
 private fun WorkspaceTerminalTabContent(
     tab: WorkspaceTerminalTab,
+    root: String?,
+    onImagePreview: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -292,10 +360,15 @@ private fun WorkspaceTerminalTabContent(
     var controlDown by remember(tab.id) { mutableStateOf(false) }
     var altDown by remember(tab.id) { mutableStateOf(false) }
     val viewClient = remember(tab.id) {
-        WorkspaceTerminalViewClient(context)
+        WorkspaceTerminalViewClient(
+            context = context,
+            root = root,
+            onImagePreview = onImagePreview,
+        )
     }
     viewClient.controlDown = controlDown
     viewClient.altDown = altDown
+    viewClient.onImagePreview = onImagePreview
 
     DisposableEffect(tab.id, viewClient) {
         onDispose {

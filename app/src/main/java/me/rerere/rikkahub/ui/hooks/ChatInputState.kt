@@ -6,8 +6,29 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.vector.ImageVector
 import me.rerere.ai.ui.UIMessagePart
 import kotlin.uuid.Uuid
+
+enum class ActionPillType {
+    MODE,
+    SKILL,
+    COMPACT,
+    UNDO,
+    REVIEW,
+    GRILL_ME,
+    GOAL,
+    IMAGINE,
+    SUBAGENT,
+    BTW,
+}
+
+data class ActionPill(
+    val id: String,
+    val label: String,
+    val icon: ImageVector,
+    val type: ActionPillType,
+)
 
 class ChatInputState {
     val textContent = TextFieldState()
@@ -16,12 +37,34 @@ class ChatInputState {
     private var editingParts: List<UIMessagePart>? = null
     private var editingAttachmentUrls: Set<String> = emptySet()
 
+    var actionPills by mutableStateOf(listOf<ActionPill>())
+
+    fun addActionPill(pill: ActionPill) {
+        val current = actionPills.toMutableList()
+        if (pill.type == ActionPillType.MODE) {
+            current.removeAll { it.type == ActionPillType.MODE }
+        } else {
+            current.removeAll { it.id == pill.id }
+        }
+        current.add(pill)
+        actionPills = current
+    }
+
+    fun removeActionPill(pill: ActionPill) {
+        actionPills = actionPills.filter { it.id != pill.id }
+    }
+
+    fun clearActionPills() {
+        actionPills = emptyList()
+    }
+
     fun clearInput() {
         textContent.setTextAndPlaceCursorAtEnd("")
         messageContent = emptyList()
         editingMessage = null
         editingParts = null
         editingAttachmentUrls = emptySet()
+        actionPills = actionPills.filter { it.type == ActionPillType.MODE }
     }
 
     fun isEditing() = editingMessage != null

@@ -11,6 +11,15 @@ import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.ServerStack01
+import me.rerere.hugeicons.stroke.ArrowRight01
+import me.rerere.ai.provider.providers.ninerouter.NineRouterService
+import me.rerere.ai.provider.providers.ninerouter.NineRouterState
+import me.rerere.ai.provider.providers.ninerouter.NineRouterStatus
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
+import org.koin.compose.koinInject
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -194,6 +203,14 @@ fun SettingProviderPage(vm: SettingVM = koinViewModel()) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 state = lazyListState,
             ) {
+                item(key = "ninerouter_card") {
+                    NineRouterCard(
+                        onClick = {
+                            navController.navigate(Screen.SettingNineRouter)
+                        }
+                    )
+                }
+
                 items(filteredProviders, key = { it.id }) { provider ->
                     ReorderableItem(
                         state = reorderableState,
@@ -702,6 +719,90 @@ private fun ProviderItem(
                 }
             }
             dragHandle()
+        }
+    }
+}
+
+@Composable
+private fun NineRouterCard(
+    onClick: () -> Unit,
+    nineRouterService: NineRouterService = koinInject(),
+) {
+    var state by remember { mutableStateOf(NineRouterState()) }
+    LaunchedEffect(Unit) {
+        state = nineRouterService.checkStatus()
+    }
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(
+            containerColor = CustomColors.listItemColors.containerColor,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = HugeIcons.ServerStack01,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "9Router Command Station",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Local AI Gateway · Reverse Proxy",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (state.status == NineRouterStatus.ONLINE) {
+                        Tag(type = TagType.SUCCESS) {
+                            Text("ONLINE · :20128")
+                        }
+                        if (state.ramMb != null) {
+                            Tag(type = TagType.INFO) {
+                                Text("${state.ramMb} MB")
+                            }
+                        }
+                    } else {
+                        Tag(type = TagType.WARNING) {
+                            Text("STOPPED")
+                        }
+                    }
+                    if (state.hasUpdate) {
+                        Tag(type = TagType.PRIMARY) {
+                            Text("Update Available")
+                        }
+                    }
+                }
+            }
+            Icon(
+                imageVector = HugeIcons.ArrowRight01,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

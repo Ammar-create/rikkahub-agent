@@ -686,6 +686,7 @@ object ChatboxImporter {
         is ProviderSetting.Codex -> "codex"
         is ProviderSetting.Grok -> "grok"
         is ProviderSetting.GeminiOAuth -> "gemini_oauth"
+        is ProviderSetting.NineRouter -> "ninerouter"
     }
 
     private fun String.toMessageRole(): MessageRole? = when (this) {

@@ -517,6 +517,58 @@ sealed class ProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("ninerouter")
+    data class NineRouter(
+        override var id: Uuid = NINEROUTER_PROVIDER_ID,
+        override var enabled: Boolean = true,
+        override var name: String = "9Router",
+        override var models: List<Model> = emptyList(),
+        override val balanceOption: BalanceOption = BalanceOption(),
+        @Transient override val builtIn: Boolean = true,
+        @Transient override val description: @Composable (() -> Unit) = {},
+        @Transient override val shortDescription: @Composable (() -> Unit) = {},
+        var baseUrl: String = "http://127.0.0.1:20128/v1",
+        var apiKey: String = "",
+    ) : ProviderSetting() {
+        override fun addModel(model: Model): ProviderSetting = copy(models = models + model)
+
+        override fun editModel(model: Model): ProviderSetting =
+            copy(models = models.map { if (it.id == model.id) model.copy() else it })
+
+        override fun delModel(model: Model): ProviderSetting =
+            copy(models = models.filter { it.id != model.id })
+
+        override fun moveMove(from: Int, to: Int): ProviderSetting {
+            return copy(models = models.toMutableList().apply {
+                val model = removeAt(from)
+                add(to, model)
+            })
+        }
+
+        override fun copyProvider(
+            id: Uuid,
+            enabled: Boolean,
+            name: String,
+            models: List<Model>,
+            balanceOption: BalanceOption,
+            builtIn: Boolean,
+            description: @Composable (() -> Unit),
+            shortDescription: @Composable (() -> Unit),
+        ): ProviderSetting {
+            return copy(
+                id = id,
+                enabled = enabled,
+                name = name,
+                models = models,
+                balanceOption = balanceOption,
+                builtIn = builtIn,
+                description = description,
+                shortDescription = shortDescription,
+            )
+        }
+    }
+
     companion object {
         // Types presented to the user when adding / converting a provider. AICore is
         // intentionally NOT in this list: it is a singleton built-in (one per device,
@@ -542,6 +594,7 @@ enum class AICoreReleaseStage { STABLE, PREVIEW }
 val AICORE_PROVIDER_ID: Uuid = Uuid.parse("a1c0a1c0-1234-4111-a000-000000000001")
 val LITERT_PROVIDER_ID: Uuid = Uuid.parse("11111111-aaaa-bbbb-cccc-000000000002")
 val LLAMACPP_PROVIDER_ID: Uuid = Uuid.parse("11111111-aaaa-bbbb-cccc-000000000003")
+val NINEROUTER_PROVIDER_ID: Uuid = Uuid.parse("99999999-9999-9999-9999-999999999999")
 private val AICORE_NANO_FAST_ID: Uuid = Uuid.parse("a1c0a1c0-1234-4111-a000-000000000002")
 private val AICORE_NANO_FULL_ID: Uuid = Uuid.parse("a1c0a1c0-1234-4111-a000-000000000003")
 

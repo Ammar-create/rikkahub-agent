@@ -204,6 +204,9 @@ val appModule = module {
             storageVolumeGrantStore = get(),
             okHttpClient = get(),
             keyboardApiClient = get(),
+            providerManager = get(),
+            filesManager = get(),
+            genMediaRepository = get(),
         )
     }
 
@@ -236,6 +239,10 @@ val appModule = module {
 
     single {
         WorkspaceTerminalSessionManager(get(), get())
+    }
+
+    single {
+        me.rerere.rikkahub.workspace.audio.WorkspaceAudioBridge(get())
     }
 
     // Phase 22A: Local-LLM on-device providers
@@ -274,7 +281,8 @@ val appModule = module {
             skillManager = get(),
             toolApprovalPreferences = get(),
             workspaceRepository = get(),
-            folderRepository = get()
+            folderRepository = get(),
+            nineRouterService = getOrNull(),
         )
     }
 

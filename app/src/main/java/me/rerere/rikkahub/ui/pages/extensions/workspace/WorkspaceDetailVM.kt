@@ -190,6 +190,20 @@ class WorkspaceDetailVM(
         }
     }
 
+    fun exportWorkspaceArchive(outputStream: OutputStream, onComplete: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            runCatching {
+                repository.exportWorkspaceArchive(id, outputStream)
+            }.onSuccess {
+                onComplete(true)
+            }.onFailure { error ->
+                Log.e(TAG, "exportWorkspaceArchive failed", error)
+                _state.update { it.copy(error = error.message ?: "导出工作区归档失败") }
+                onComplete(false)
+            }
+        }
+    }
+
     suspend fun resolveImageFile(
         entry: WorkspaceFileEntry,
         area: WorkspaceStorageArea,

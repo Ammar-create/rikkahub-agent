@@ -57,6 +57,12 @@ fun ExtensionsPage() {
                     title = { Text(stringResource(R.string.extensions_page_section_extensions)) },
                 ) {
                     item(
+                        onClick = { navController.navigate(Screen.Actions) },
+                        leadingContent = { Icon(HugeIcons.Tools, null) },
+                        headlineContent = { Text(stringResource(R.string.extensions_page_actions)) },
+                        supportingContent = { Text(stringResource(R.string.extensions_page_actions_desc)) },
+                    )
+                    item(
                         onClick = { navController.navigate(Screen.QuickMessages) },
                         leadingContent = { Icon(HugeIcons.Zap, null) },
                         headlineContent = { Text(stringResource(R.string.assistant_page_quick_messages)) },

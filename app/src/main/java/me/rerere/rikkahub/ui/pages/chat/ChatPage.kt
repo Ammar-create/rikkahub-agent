@@ -66,16 +66,26 @@ import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Edit03
+import me.rerere.hugeicons.stroke.Tools
+import me.rerere.rikkahub.data.files.SkillManager
+import me.rerere.rikkahub.ui.components.ai.completion.SourceCode01
+import me.rerere.rikkahub.ui.hooks.ActionPill
+import me.rerere.rikkahub.ui.hooks.ActionPillType
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.service.ChatError
+import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.ui.components.ai.ChatAttachmentPickerActions
 import me.rerere.rikkahub.ui.components.ai.ChatInput
 import me.rerere.rikkahub.ui.components.ai.FilesPicker
 import me.rerere.rikkahub.ui.components.ai.SearchMode
 import me.rerere.rikkahub.data.ai.AgentMode
 import me.rerere.rikkahub.data.ai.ConversationAgentMode
+import me.rerere.rikkahub.data.datastore.ActionIcons
 import me.rerere.rikkahub.ui.components.ai.completion.SlashCommandCompletionProvider
 import me.rerere.rikkahub.ui.components.ai.completion.WorkspaceCompletionProvider
 import me.rerere.rikkahub.ui.components.ai.rememberChatAttachmentPickerActions
@@ -99,6 +109,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
         }
     )
     val filesManager: FilesManager = koinInject()
+    val skillManager: SkillManager = koinInject()
     val navController = LocalNavController.current
     val scope = rememberCoroutineScope()
 
@@ -283,6 +294,7 @@ private fun ChatPageContent(
     val toaster = LocalToaster.current
     val context = LocalContext.current
     val workspaceRepository: WorkspaceRepository = koinInject()
+    val chatService: ChatService = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val hazeState = rememberHazeState()
     val assistant = setting.getCurrentAssistant()
@@ -296,11 +308,54 @@ private fun ChatPageContent(
         setting.getCurrentChatModel()?.findProvider(setting.providers) is ProviderSetting.Google
 
     val agentMode by ConversationAgentMode.getFlow(conversation.id).collectAsStateWithLifecycle()
-    val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository, agentMode) {
+    val completionProviders = remember(
+        assistant.workspaceId,
+        conversation.workspaceCwd,
+        workspaceRepository,
+        agentMode,
+        conversation.id,
+    ) {
         buildList {
             add(
                 SlashCommandCompletionProvider(
-                    currentMode = { ConversationAgentMode.get(conversation.id) }
+                    currentMode = { ConversationAgentMode.get(conversation.id) },
+                    listSkills = {
+                        runCatching { skillManager.listSkills().map { it.name } }.getOrDefault(emptyList())
+                    },
+                    disabledActions = { setting.disabledBuiltInActions },
+                    customActions = { setting.customActions.filter { it.enabled } },
+                    customModes = { setting.customModes.filter { it.enabled } },
+                    onModeSelected = { mode ->
+                        ConversationAgentMode.set(conversation.id, mode)
+                        inputState.addActionPill(
+                            ActionPill(
+                                id = "mode",
+                                label = if (mode == AgentMode.PLAN) "Plan" else "Build",
+                                icon = if (mode == AgentMode.PLAN) HugeIcons.Edit03 else HugeIcons.Tools,
+                                type = ActionPillType.MODE,
+                            )
+                        )
+                    },
+                    onCustomModeSelected = { customMode ->
+                        inputState.addActionPill(
+                            ActionPill(
+                                id = "mode_${customMode.id}",
+                                label = customMode.name,
+                                icon = ActionIcons.get(customMode.icon),
+                                type = ActionPillType.MODE,
+                            )
+                        )
+                    },
+                    onSkillSelected = { skillName ->
+                        inputState.addActionPill(
+                            ActionPill(
+                                id = "skill_$skillName",
+                                label = skillName,
+                                icon = HugeIcons.SourceCode01,
+                                type = ActionPillType.SKILL,
+                            )
+                        )
+                    },
                 )
             )
             assistant.workspaceId?.let { workspaceId ->
@@ -311,6 +366,24 @@ private fun ChatPageContent(
                         currentCwd = conversation.workspaceCwd,
                     )
                 )
+            }
+        }
+    }
+
+    LaunchedEffect(conversation.id, agentMode) {
+        if (agentMode == AgentMode.PLAN) {
+            inputState.addActionPill(
+                ActionPill(
+                    id = "mode",
+                    label = "Plan",
+                    icon = HugeIcons.Edit03,
+                    type = ActionPillType.MODE,
+                )
+            )
+        } else {
+            val existing = inputState.actionPills.find { it.type == ActionPillType.MODE }
+            if (existing != null && existing.label == "Plan") {
+                inputState.removeActionPill(existing)
             }
         }
     }
@@ -355,9 +428,16 @@ private fun ChatPageContent(
                     settings = setting,
                     hazeState = hazeState,
                     completionProviders = completionProviders,
+                    onRemovePill = { pill ->
+                        if (pill.type == ActionPillType.MODE) {
+                            ConversationAgentMode.set(conversation.id, AgentMode.BUILD)
+                        }
+                        inputState.removeActionPill(pill)
+                    },
                     onCancelClick = {
                         vm.stopGeneration()
                     },
+                    onUpdateSettings = { vm.updateSettings(it) },
                     enableSearch = enableWebSearch,
                     onUpdateSearchMode = { mode ->
                         val current = setting.getCurrentAssistant()
@@ -407,28 +487,268 @@ private fun ChatPageContent(
                             val textPart = contents.firstOrNull() as? UIMessagePart.Text
                             val rawText = textPart?.text?.trim().orEmpty()
 
-                            // Check slash commands
-                            if (contents.size == 1 && textPart != null && rawText.equals("/plan", ignoreCase = true)) {
-                                ConversationAgentMode.set(conversation.id, AgentMode.PLAN)
-                                toaster.show("Switched to Plan mode", type = ToastType.Success)
-                                inputState.clearInput()
-                                return@ChatInput
+                            // Check slash commands for direct text entry
+                            if (contents.size == 1 && textPart != null && rawText.startsWith("/mode", ignoreCase = true)) {
+                                val sub = rawText.removePrefix("/mode").removePrefix("/Mode").trim()
+                                if (sub.equals("plan", ignoreCase = true)) {
+                                    ConversationAgentMode.set(conversation.id, AgentMode.PLAN)
+                                    toaster.show("Switched to Plan mode", type = ToastType.Success)
+                                    inputState.clearInput()
+                                    return@ChatInput
+                                } else if (sub.equals("build", ignoreCase = true)) {
+                                    ConversationAgentMode.set(conversation.id, AgentMode.BUILD)
+                                    toaster.show("Switched to Build mode", type = ToastType.Success)
+                                    inputState.clearInput()
+                                    return@ChatInput
+                                }
                             }
-                            if (contents.size == 1 && textPart != null && rawText.equals("/build", ignoreCase = true)) {
-                                ConversationAgentMode.set(conversation.id, AgentMode.BUILD)
-                                toaster.show("Switched to Build mode", type = ToastType.Success)
+
+                            // 1. /compact
+                            val hasCompactPill = inputState.actionPills.any {
+                                it.type == ActionPillType.COMPACT || it.id.equals("compact", ignoreCase = true)
+                            }
+                            val isCompactCmd = textPart != null && (rawText.equals("/compact", ignoreCase = true) || rawText.startsWith("/compact ", ignoreCase = true))
+                            if (isCompactCmd || hasCompactPill) {
+                                val extra = if (isCompactCmd) {
+                                    rawText.replaceFirst(Regex("^/compact\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                toaster.show("Compacting conversation context...", type = ToastType.Normal)
+                                scope.launch {
+                                    chatService.manualCompact(
+                                        conversationId = conversation.id,
+                                        additionalPrompt = extra,
+                                    ).await()
+                                }
                                 inputState.clearInput()
                                 return@ChatInput
                             }
 
-                            val finalContents = if (textPart != null && rawText.startsWith("/plan ", ignoreCase = true)) {
-                                ConversationAgentMode.set(conversation.id, AgentMode.PLAN)
-                                toaster.show("Switched to Plan mode", type = ToastType.Success)
-                                listOf(UIMessagePart.Text(rawText.removePrefix("/plan ").trim())) + contents.drop(1)
-                            } else if (textPart != null && rawText.startsWith("/build ", ignoreCase = true)) {
-                                ConversationAgentMode.set(conversation.id, AgentMode.BUILD)
-                                toaster.show("Switched to Build mode", type = ToastType.Success)
-                                listOf(UIMessagePart.Text(rawText.removePrefix("/build ").trim())) + contents.drop(1)
+                            // 2. /undo
+                            val hasUndoPill = inputState.actionPills.any {
+                                it.type == ActionPillType.UNDO || it.id.equals("undo", ignoreCase = true)
+                            }
+                            val isUndoCmd = textPart != null && (rawText.equals("/undo", ignoreCase = true) || rawText.startsWith("/undo ", ignoreCase = true))
+                            if (isUndoCmd || hasUndoPill) {
+                                val workspaceId = assistant.workspaceId
+                                if (workspaceId != null) {
+                                    scope.launch {
+                                        val res = workspaceRepository.executeCommand(
+                                            workspaceId.toString(),
+                                            "git checkout -- .",
+                                        )
+                                        if (res.exitCode == 0) {
+                                            toaster.show("Reverted uncommitted workspace edits", type = ToastType.Success)
+                                        } else {
+                                            toaster.show("Undo failed: ${res.stderr.ifBlank { "unknown error" }}", type = ToastType.Error)
+                                        }
+                                    }
+                                } else {
+                                    toaster.show("No active workspace bound to this assistant", type = ToastType.Normal)
+                                }
+                                inputState.clearInput()
+                                return@ChatInput
+                            }
+
+                            // 3. /review
+                            val hasReviewPill = inputState.actionPills.any {
+                                it.type == ActionPillType.REVIEW || it.id.equals("review", ignoreCase = true)
+                            }
+                            val isReviewCmd = textPart != null && (rawText.equals("/review", ignoreCase = true) || rawText.startsWith("/review ", ignoreCase = true))
+                            if (isReviewCmd || hasReviewPill) {
+                                val extraText = if (isReviewCmd) {
+                                    rawText.replaceFirst(Regex("^/review\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                val workspaceId = assistant.workspaceId
+                                scope.launch {
+                                    val gitDiff = if (workspaceId != null) {
+                                        runCatching {
+                                            workspaceRepository.executeCommand(workspaceId.toString(), "git diff HEAD").stdout.trim()
+                                        }.getOrDefault("")
+                                    } else ""
+
+                                    val reviewPrompt = if (gitDiff.isNotBlank()) {
+                                        buildString {
+                                            append("Review the following uncommitted workspace changes for bugs, syntax errors, and missing tests:\n\n```diff\n")
+                                            append(gitDiff)
+                                            append("\n```")
+                                            if (extraText.isNotBlank()) {
+                                                append("\n\n")
+                                                append(extraText)
+                                            }
+                                        }
+                                    } else {
+                                        if (extraText.isNotBlank()) {
+                                            "Review the following uncommitted workspace changes for bugs, syntax errors, and missing tests:\n\n$extraText"
+                                        } else {
+                                            toaster.show("No uncommitted workspace changes found to review", type = ToastType.Normal)
+                                            return@launch
+                                        }
+                                    }
+
+                                    val skillPills = inputState.actionPills.filter { it.type == ActionPillType.SKILL }
+                                    val finalReviewText = if (skillPills.isNotEmpty()) {
+                                        val skillInstruction = skillPills.joinToString(" ") { "Use skill: ${it.label}." }
+                                        "$skillInstruction\n\n$reviewPrompt"
+                                    } else {
+                                        reviewPrompt
+                                    }
+                                    vm.handleMessageSend(listOf(UIMessagePart.Text(finalReviewText)) + contents.drop(1))
+                                }
+                                inputState.clearInput()
+                                return@ChatInput
+                            }
+
+                            // Process prompt transformations for Actions
+                            var actionProcessedText = rawText
+
+                            // 4. /grill-me
+                            val hasGrillMePill = inputState.actionPills.any {
+                                it.type == ActionPillType.GRILL_ME || it.id.equals("grill-me", ignoreCase = true) || it.id.equals("grillme", ignoreCase = true)
+                            }
+                            val isGrillMeCmd = textPart != null && (rawText.equals("/grill-me", ignoreCase = true) || rawText.startsWith("/grill-me ", ignoreCase = true) || rawText.equals("/grillme", ignoreCase = true) || rawText.startsWith("/grillme ", ignoreCase = true))
+                            if (isGrillMeCmd || hasGrillMePill) {
+                                val taskText = if (isGrillMeCmd) {
+                                    rawText.replaceFirst(Regex("^/grill-?me\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                actionProcessedText = if (taskText.isNotBlank()) {
+                                    "[Action: Grill-me] Before writing any code or modifying any files, interview me one question at a time to align on scope, edge cases, and design. Provide a recommended answer for each question.\n\n$taskText"
+                                } else {
+                                    "[Action: Grill-me] Before writing any code or modifying any files, interview me one question at a time to align on scope, edge cases, and design. Provide a recommended answer for each question."
+                                }
+                            }
+
+                            // 5. /goal
+                            val hasGoalPill = inputState.actionPills.any {
+                                it.type == ActionPillType.GOAL || it.id.equals("goal", ignoreCase = true)
+                            }
+                            val isGoalCmd = textPart != null && (rawText.equals("/goal", ignoreCase = true) || rawText.startsWith("/goal ", ignoreCase = true))
+                            if (isGoalCmd || hasGoalPill) {
+                                val objective = if (isGoalCmd) {
+                                    rawText.replaceFirst(Regex("^/goal\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                actionProcessedText = "[Action: Goal] Autonomous objective: $objective\nExecute autonomously across turns until this objective is verified completely finished. Do not pause between turns."
+                            }
+
+                            // 6. /imagine
+                            val hasImaginePill = inputState.actionPills.any {
+                                it.type == ActionPillType.IMAGINE || it.id.equals("imagine", ignoreCase = true)
+                            }
+                            val isImagineCmd = textPart != null && (rawText.equals("/imagine", ignoreCase = true) || rawText.startsWith("/imagine ", ignoreCase = true))
+                            if (isImagineCmd || hasImaginePill) {
+                                val imagePrompt = if (isImagineCmd) {
+                                    rawText.replaceFirst(Regex("^/imagine\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                val configuredRatio = setting.imageAspectRatio.ifBlank { "auto" }
+                                actionProcessedText = "[Action: Imagine] Please invoke the generate_image tool now to create an image. Prompt: \"$imagePrompt\", aspect_ratio: \"$configuredRatio\". Autonomously execute this tool call immediately."
+
+                                // Ensure generate_image tool is enabled for the assistant so the model can invoke it
+                                val currentAssistant = setting.getCurrentAssistant()
+                                if (!currentAssistant.localTools.contains(LocalToolOption.ImageGeneration)) {
+                                    vm.updateSettings(
+                                        setting.copy(
+                                            assistants = setting.assistants.map {
+                                                if (it.id == currentAssistant.id) {
+                                                    it.copy(localTools = (it.localTools + LocalToolOption.ImageGeneration).distinct())
+                                                } else {
+                                                    it
+                                                }
+                                            }
+                                        )
+                                    )
+                                }
+                            }
+
+                            // 7. /subagent
+                            val hasSubagentPill = inputState.actionPills.any {
+                                it.type == ActionPillType.SUBAGENT || it.id.equals("subagent", ignoreCase = true)
+                            }
+                            val isSubagentCmd = textPart != null && (rawText.equals("/subagent", ignoreCase = true) || rawText.startsWith("/subagent ", ignoreCase = true))
+                            if (isSubagentCmd || hasSubagentPill) {
+                                val taskText = if (isSubagentCmd) {
+                                    rawText.replaceFirst(Regex("^/subagent\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                actionProcessedText = "[Action: Subagent] Dispatch a sub-agent to autonomously execute this task: $taskText"
+                            }
+
+                            // 8. /btw
+                            val hasBtwPill = inputState.actionPills.any {
+                                it.type == ActionPillType.BTW || it.id.equals("btw", ignoreCase = true)
+                            }
+                            val isBtwCmd = textPart != null && (rawText.equals("/btw", ignoreCase = true) || rawText.startsWith("/btw ", ignoreCase = true))
+                            if (isBtwCmd || hasBtwPill) {
+                                val question = if (isBtwCmd) {
+                                    rawText.replaceFirst(Regex("^/btw\\s*", RegexOption.IGNORE_CASE), "").trim()
+                                } else {
+                                    rawText
+                                }
+                                actionProcessedText = "[Side Question (btw)]: $question"
+                            }
+
+                            // 9. Custom Actions
+                            val matchedCustomAction = setting.customActions.firstOrNull { customAction ->
+                                customAction.enabled && (
+                                    inputState.actionPills.any {
+                                        it.id == customAction.id || it.label.equals(customAction.name, ignoreCase = true)
+                                    } || (textPart != null && (
+                                        rawText.equals(customAction.prefix, ignoreCase = true) ||
+                                        rawText.startsWith("${customAction.prefix} ", ignoreCase = true)
+                                    ))
+                                )
+                            }
+                            if (matchedCustomAction != null) {
+                                val userArg = if (textPart != null && (
+                                        rawText.equals(matchedCustomAction.prefix, ignoreCase = true) ||
+                                        rawText.startsWith("${matchedCustomAction.prefix} ", ignoreCase = true)
+                                    )) {
+                                    rawText.substring(matchedCustomAction.prefix.length).trim()
+                                } else {
+                                    rawText
+                                }
+                                actionProcessedText = if (userArg.isNotBlank()) {
+                                    "${matchedCustomAction.promptTemplate}\n\n$userArg"
+                                } else {
+                                    matchedCustomAction.promptTemplate
+                                }
+                            }
+
+                            // 10. Custom Modes addendum
+                            val customModePill = inputState.actionPills.find { pill ->
+                                pill.type == ActionPillType.MODE && setting.customModes.any { it.name.equals(pill.label, ignoreCase = true) }
+                            }
+                            if (customModePill != null) {
+                                val modeDef = setting.customModes.find { it.name.equals(customModePill.label, ignoreCase = true) }
+                                if (modeDef != null && modeDef.systemPromptAddendum.isNotBlank()) {
+                                    actionProcessedText = "[Mode: ${modeDef.name}]\n${modeDef.systemPromptAddendum}\n\n$actionProcessedText"
+                                }
+                            }
+
+                            val skillPills = inputState.actionPills.filter { it.type == ActionPillType.SKILL }
+                            val finalContents = if (skillPills.isNotEmpty() || actionProcessedText != rawText) {
+                                val skillInstruction = if (skillPills.isNotEmpty()) {
+                                    skillPills.joinToString(" ") { "Use skill: ${it.label}." }
+                                } else ""
+                                val textWithSkills = if (skillInstruction.isNotBlank()) {
+                                    if (actionProcessedText.isNotBlank()) "$skillInstruction\n\n$actionProcessedText" else skillInstruction
+                                } else {
+                                    actionProcessedText
+                                }
+                                if (textPart != null) {
+                                    listOf(UIMessagePart.Text(textWithSkills)) + contents.drop(1)
+                                } else {
+                                    listOf(UIMessagePart.Text(textWithSkills)) + contents
+                                }
                             } else {
                                 contents
                             }
