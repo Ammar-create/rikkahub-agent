@@ -80,6 +80,21 @@ jobs:
           cp app/release.keystore release.keystore
           printf "storeFile=release.keystore\nstorePassword=android\nkeyAlias=androiddebugkey\nkeyPassword=android\n" > local.properties
 
+      - name: Warm Gradle wrapper
+        run: |
+          chmod +x gradlew
+          for i in $(seq 1 10); do
+            if ./gradlew --version; then
+              echo "Gradle wrapper ready"
+              exit 0
+            fi
+            echo "Gradle bootstrap attempt $i failed (transient CDN 504), retrying in 15s"
+            rm -rf ~/.gradle/wrapper/dists/gradle-9.5.0-bin
+            sleep 15
+          done
+          echo "Gradle wrapper could not be downloaded after 10 attempts"
+          exit 1
+
       - name: Build Stable Release APK
         run: |
           chmod +x gradlew
