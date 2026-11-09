@@ -1099,9 +1099,6 @@ fun Settings.getCurrentChatModel(): Model? {
 val Settings.defaultImageModelId: Uuid
     get() = imageGenerationModelId
 
-val Settings.defaultImageModel: Model?
-    get() = findModelById(this.imageGenerationModelId)
-
 fun Settings.getDefaultImageModel(): Model? {
     return findModelById(this.imageGenerationModelId)
 }
